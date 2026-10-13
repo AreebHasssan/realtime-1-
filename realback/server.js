@@ -36,7 +36,10 @@ app.use("/api/auth", authRoutes);
 app.use("/api", googleAuthRoutes);
 app.use("/api/meetings", meetingRoutes);
 
-const io = new Server({
+const http = require("http");
+const server = http.createServer(app);
+
+const io = new Server(server, {
   cors: {
     origin: "*",
     methods: ["GET", "POST"],
@@ -46,8 +49,6 @@ const io = new Server({
 setupSocket(io);
 
 const PORT = process.env.PORT || 8000;
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+server.listen(PORT, () => {
+  console.log(`Server and WebSockets running on port ${PORT}`);
 });
-
-io.listen(8001);

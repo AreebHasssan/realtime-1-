@@ -10,9 +10,11 @@ router.get(
   passport.authenticate("google", { scope: ["profile", "email"], session: false })
 );
 
+const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+
 router.get(
   "/auth/google/callback",
-  passport.authenticate("google", { session: false, failureRedirect: "http://localhost:3000/auth" }),
+  passport.authenticate("google", { session: false, failureRedirect: `${frontendUrl}/auth` }),
   googleCallbackController
 );
 
@@ -21,7 +23,12 @@ router.get("/auth/verify", authMiddleware, (req, res) => {
 });
 
 router.get("/auth/logout", (req, res) => {
-  res.clearCookie("token");
+  const isProduction = process.env.NODE_ENV === "production";
+  res.clearCookie("token", {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: isProduction ? "none" : "lax",
+  });
   res.status(200).json({ message: "Logged out successfully" });
 });
 
