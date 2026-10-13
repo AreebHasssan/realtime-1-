@@ -88,7 +88,9 @@ function withoutRemoteStream(streams: RemoteStreams, peerId: string): RemoteStre
 }
 
 function createFallbackStream() {
-    if (typeof document === "undefined") return new MediaStream();
+    if (typeof window === "undefined" || typeof document === "undefined" || typeof MediaStream === "undefined") {
+        return null as any;
+    }
     const canvas = document.createElement("canvas");
     canvas.width = 360;
     canvas.height = 260;

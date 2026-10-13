@@ -1,5 +1,16 @@
+"use client";
+
 import { Suspense, use } from "react";
-import Real from "./real";
+import dynamic from "next/dynamic";
+
+const Real = dynamic(() => import("./real"), {
+  ssr: false,
+  loading: () => (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#0f172a", color: "#94a3b8", fontWeight: 500 }}>
+      Loading Meeting...
+    </div>
+  ),
+});
 
 function RealtimeRoom({ paramsPromise }: { paramsPromise: Promise<{ id: string }> }) {
   const { id } = use(paramsPromise);

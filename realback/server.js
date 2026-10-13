@@ -37,6 +37,8 @@ app.use("/api", googleAuthRoutes);
 app.use("/api/meetings", meetingRoutes);
 
 const http = require("http");
+const server = http.createServer(app);
+
 const allowedOrigins = [
   frontendUrl,
   frontendUrl.replace(/\/$/, ""),
