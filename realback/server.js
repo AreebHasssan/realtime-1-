@@ -1,0 +1,53 @@
+require("dotenv").config();
+const express = require("express");
+const cors = require("cors");
+const cookieParser = require("cookie-parser");
+const mongoose = require("mongoose");
+const { Server } = require("socket.io");
+const setupSocket = require("./sockets/wrtc");
+const authRoutes = require("./route/auth/auth");
+const googleAuthRoutes = require("./route/googleauth/googleauth");
+const meetingRoutes = require("./route/meeting/meeting");
+
+const app = express();
+
+const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+
+app.use(
+  cors({
+    origin: [frontendUrl, "http://localhost:3000", "http://127.0.0.1:3000"],
+    credentials: true,
+  })
+);
+app.use(cookieParser());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Connect to MongoDB
+if (process.env.DB_URL) {
+  mongoose
+    .connect(process.env.DB_URL)
+    .then(() => console.log("MongoDB connected successfully"))
+    .catch((err) => console.error("MongoDB connection error:", err.message));
+}
+
+// Routes
+app.use("/api/auth", authRoutes);
+app.use("/api", googleAuthRoutes);
+app.use("/api/meetings", meetingRoutes);
+
+const io = new Server({
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"],
+  },
+});
+
+setupSocket(io);
+
+const PORT = process.env.PORT || 8000;
+app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
+});
+
+io.listen(8001);
