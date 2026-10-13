@@ -37,12 +37,24 @@ app.use("/api", googleAuthRoutes);
 app.use("/api/meetings", meetingRoutes);
 
 const http = require("http");
-const server = http.createServer(app);
+const allowedOrigins = [
+  frontendUrl,
+  frontendUrl.replace(/\/$/, ""),
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+];
 
 const io = new Server(server, {
   cors: {
-    origin: "*",
+    origin: (origin, callback) => {
+      // Allow any origin in dev or if origin is in allowedOrigins
+      if (!origin || allowedOrigins.includes(origin) || process.env.NODE_ENV !== "production") {
+        return callback(null, true);
+      }
+      return callback(null, true);
+    },
     methods: ["GET", "POST"],
+    credentials: true,
   },
 });
 

@@ -20,6 +20,7 @@ const SocketProvider = ({ children }: { children: React.ReactNode }) => {
 
         const newSocket = io(backendUrl, {
             withCredentials: true,
+            transports: ["websocket", "polling"],
         });
 
         setSocket(newSocket);
