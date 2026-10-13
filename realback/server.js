@@ -32,6 +32,12 @@ if (process.env.DB_URL) {
 }
 
 // Routes
+app.get("/", (req, res) => {
+  res.status(200).json({ status: "online", message: "RealTime Backend API is running" });
+});
+app.get("/api/health", (req, res) => {
+  res.status(200).json({ status: "healthy" });
+});
 app.use("/api/auth", authRoutes);
 app.use("/api", googleAuthRoutes);
 app.use("/api/meetings", meetingRoutes);
