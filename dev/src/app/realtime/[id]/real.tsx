@@ -642,6 +642,21 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
         }
     }, [joinStatus, getCamera]);
 
+    // Automatically detect when user grants Camera permission in Android settings
+    useEffect(() => {
+        if (typeof navigator !== "undefined" && Boolean((navigator as any).permissions?.query)) {
+            try {
+                (navigator as any).permissions.query({ name: "camera" }).then((status: any) => {
+                    status.onchange = () => {
+                        if (status.state === "granted") {
+                            getCamera();
+                        }
+                    };
+                }).catch(() => { });
+            } catch { }
+        }
+    }, [getCamera]);
+
     // Socket Event Handling
     useEffect(() => {
         if (!socket) return;
