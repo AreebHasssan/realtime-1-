@@ -49,6 +49,65 @@ function setupSocket(io) {
             }
         });
 
+        // Participant requests permission to speak
+        socket.on("request-to-speak", (data) => {
+            const roomId = data?.roomId || currentRoom;
+            const email = data?.email || userProfiles.get(socket.id)?.email || "Guest";
+            const name = data?.name || userProfiles.get(socket.id)?.name || email;
+
+            const admin = roomAdmins.get(roomId);
+            if (admin) {
+                io.to(admin.socketId).emit("speak-request", {
+                    socketId: socket.id,
+                    email,
+                    name,
+                });
+            }
+        });
+
+        // Participant cancels speak request
+        socket.on("cancel-speak-request", (data) => {
+            const roomId = data?.roomId || currentRoom;
+            const admin = roomAdmins.get(roomId);
+            if (admin) {
+                io.to(admin.socketId).emit("speak-request-cancelled", {
+                    socketId: socket.id,
+                });
+            }
+        });
+
+        // Admin allows participant to speak
+        socket.on("allow-speak", ({ targetSocketId, roomId }) => {
+            const rId = roomId || currentRoom;
+            if (roomAdmins.get(rId)?.socketId === socket.id) {
+                const profile = userProfiles.get(targetSocketId);
+                if (profile) profile.canSpeak = true;
+
+                io.to(targetSocketId).emit("speak-allowed");
+                io.to(rId).emit("user-speak-state", { socketId: targetSocketId, canSpeak: true });
+            }
+        });
+
+        // Admin denies participant's request to speak
+        socket.on("deny-speak", ({ targetSocketId, roomId }) => {
+            const rId = roomId || currentRoom;
+            if (roomAdmins.get(rId)?.socketId === socket.id) {
+                io.to(targetSocketId).emit("speak-denied");
+            }
+        });
+
+        // Admin mutes / closes a participant's mic
+        socket.on("revoke-speak", ({ targetSocketId, roomId }) => {
+            const rId = roomId || currentRoom;
+            if (roomAdmins.get(rId)?.socketId === socket.id) {
+                const profile = userProfiles.get(targetSocketId);
+                if (profile) profile.canSpeak = false;
+
+                io.to(targetSocketId).emit("admin-muted");
+                io.to(rId).emit("user-speak-state", { socketId: targetSocketId, canSpeak: false });
+            }
+        });
+
         // Volatile UDP-like in-meeting chat message (not stored in DB)
         socket.on("send-message", ({ roomId, text, senderEmail, time }) => {
             if (roomId && text) {
@@ -83,12 +142,14 @@ function setupSocket(io) {
             socket.join(roomId);
 
             const isVideoOff = Boolean(data?.isVideoOff);
+            const canSpeak = isAdmin; // Only admin can speak by default
 
             userProfiles.set(socket.id, {
                 email: userEmail,
                 name: userName,
                 roomId,
                 isVideoOff,
+                canSpeak,
             });
 
             console.log(`Socket ${socket.id} joined room ${roomId} (Admin: ${isAdmin})`);
@@ -104,7 +165,7 @@ function setupSocket(io) {
             // Map user profiles for existing peers
             const peersProfiles = {};
             otherUsers.forEach((id) => {
-                peersProfiles[id] = userProfiles.get(id) || { email: "Participant", name: "Participant", isVideoOff: false };
+                peersProfiles[id] = userProfiles.get(id) || { email: "Participant", name: "Participant", isVideoOff: false, canSpeak: false };
             });
 
             socket.emit("all-users", otherUsers);

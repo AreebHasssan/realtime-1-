@@ -54,6 +54,13 @@ interface PeerProfile {
     email: string;
     name: string;
     isVideoOff?: boolean;
+    canSpeak?: boolean;
+}
+
+interface SpeakRequest {
+    socketId: string;
+    email: string;
+    name: string;
 }
 
 interface ChatMessage {
@@ -99,8 +106,106 @@ function createFallbackStream() {
         ctx.fillStyle = "#1e293b";
         ctx.fillRect(0, 0, 360, 260);
     }
-    return (canvas as any).captureStream ? (canvas as any).captureStream(1) : new MediaStream();
+    const stream = (canvas as any).captureStream ? (canvas as any).captureStream(1) : new MediaStream();
+    stream.getVideoTracks().forEach((track: any) => {
+        track.__isFallback = true;
+    });
+    return stream;
 }
+
+// Multi-tier media acquisition optimized for mobile and desktop browsers
+async function acquireUserMedia(preferredFacingMode: "user" | "environment" = "user"): Promise<{
+    stream: MediaStream;
+    hasVideo: boolean;
+    hasAudio: boolean;
+}> {
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+        const fallback = createFallbackStream() || new MediaStream();
+        return { stream: fallback, hasVideo: false, hasAudio: false };
+    }
+
+    const mobileVideoConstraints: MediaTrackConstraints = {
+        facingMode: { ideal: preferredFacingMode },
+        width: { ideal: 1280, max: 1920 },
+        height: { ideal: 720, max: 1080 },
+    };
+
+    // Tier 1: Front camera (facingMode: user) + Audio with noise/echo suppression
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+            video: mobileVideoConstraints,
+            audio: { echoCancellation: true, noiseSuppression: true },
+        });
+        return {
+            stream,
+            hasVideo: stream.getVideoTracks().length > 0,
+            hasAudio: stream.getAudioTracks().length > 0,
+        };
+    } catch (e1) {
+        console.warn("Tier 1 (facingMode + audio) failed on device:", e1);
+    }
+
+    // Tier 2: Generic combined { video: true, audio: true }
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: true,
+        });
+        return {
+            stream,
+            hasVideo: stream.getVideoTracks().length > 0,
+            hasAudio: stream.getAudioTracks().length > 0,
+        };
+    } catch (e2) {
+        console.warn("Tier 2 (generic video + audio) failed:", e2);
+    }
+
+    // Tier 3: Separate acquisition (fixes mobile dual-hardware lock / split permissions)
+    let audioTrack: MediaStreamTrack | null = null;
+    let videoTrack: MediaStreamTrack | null = null;
+
+    try {
+        const vStream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { ideal: preferredFacingMode } },
+        });
+        videoTrack = vStream.getVideoTracks()[0] || null;
+    } catch {
+        try {
+            const vStream = await navigator.mediaDevices.getUserMedia({ video: true });
+            videoTrack = vStream.getVideoTracks()[0] || null;
+        } catch (eVideo) {
+            console.warn("Separate video request failed on mobile:", eVideo);
+        }
+    }
+
+    try {
+        const aStream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true },
+        }).catch(() => navigator.mediaDevices.getUserMedia({ audio: true }));
+        audioTrack = aStream.getAudioTracks()[0] || null;
+    } catch (eAudio) {
+        console.warn("Separate audio request failed:", eAudio);
+    }
+
+    const tracks: MediaStreamTrack[] = [
+        ...(audioTrack ? [audioTrack] : []),
+        ...(videoTrack ? [videoTrack] : []),
+    ];
+
+    if (tracks.length > 0) {
+        const stream = new MediaStream(tracks);
+        return {
+            stream,
+            hasVideo: stream.getVideoTracks().length > 0,
+            hasAudio: stream.getAudioTracks().length > 0,
+        };
+    }
+
+    // Tier 4: Fallback placeholder stream so user can still join room smoothly
+    const fallback = createFallbackStream() || new MediaStream();
+    return { stream: fallback, hasVideo: false, hasAudio: false };
+}
+
 
 // Remote Video Tile
 function RemoteVideo({
@@ -111,6 +216,9 @@ function RemoteVideo({
     profile,
     isAdmin,
     onRemove,
+    onMuteParticipant,
+    onAllowSpeak,
+    isSpeakRequested,
 }: {
     stream: MediaStream;
     peerId: string;
@@ -119,6 +227,9 @@ function RemoteVideo({
     profile?: PeerProfile;
     isAdmin: boolean;
     onRemove?: (peerId: string) => void;
+    onMuteParticipant?: (peerId: string) => void;
+    onAllowSpeak?: (peerId: string) => void;
+    isSpeakRequested?: boolean;
 }) {
     const videoRef = useRef<HTMLVideoElement | null>(null);
     const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -145,7 +256,10 @@ function RemoteVideo({
             t.addEventListener("ended", checkTracks);
         });
 
+        const timer = setInterval(checkTracks, 500);
+
         return () => {
+            clearInterval(timer);
             stream?.removeEventListener("addtrack", checkTracks);
             stream?.removeEventListener("removetrack", checkTracks);
             tracks.forEach((t) => {
@@ -156,8 +270,8 @@ function RemoteVideo({
         };
     }, [stream]);
 
-    // Video is off if profile says so OR if there is no live video track
-    const isVideoOff = Boolean(profile?.isVideoOff) || !hasLiveVideoTrack;
+    // Presentation stage (isMain) is NEVER considered "video off". Only regular peer camera tiles check profile.isVideoOff.
+    const isVideoOff = isMain ? false : (Boolean(profile?.isVideoOff) || !hasLiveVideoTrack);
 
     // Keep stream attached to video element
     useEffect(() => {
@@ -185,15 +299,15 @@ function RemoteVideo({
     const containerStyle = isMain
         ? MAIN_VIDEO_CONTAINER_STYLE
         : isThumbnail
-        ? THUMBNAIL_CONTAINER_STYLE
-        : VIDEO_CONTAINER_STYLE;
+            ? THUMBNAIL_CONTAINER_STYLE
+            : VIDEO_CONTAINER_STYLE;
 
     return (
         <div style={containerStyle}>
             {/* Audio stream for mic audio even when camera is disabled */}
             <audio ref={audioRef} autoPlay playsInline />
 
-            {/* Header with peer email & Admin remove button */}
+            {/* Header with peer email & Admin controls */}
             <div
                 style={{
                     position: "absolute",
@@ -215,28 +329,80 @@ function RemoteVideo({
                         padding: "3px 8px",
                         borderRadius: "6px",
                         backdropFilter: "blur(4px)",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "6px",
                     }}
                 >
-                    {isMain ? `🖥️ ${email}'s Screen` : email}
+                    {isMain ? `🖥️ ${email}'s Screen` : (
+                        <>
+                            <span>{email}</span>
+                            <span>{profile?.canSpeak ? "🎤" : "🔇"}</span>
+                        </>
+                    )}
                 </span>
 
-                {isAdmin && onRemove && !isMain && (
-                    <button
-                        onClick={() => onRemove(peerId)}
-                        title="Remove user from meeting"
-                        style={{
-                            background: "rgba(220, 38, 38, 0.9)",
-                            color: "#fff",
-                            border: "none",
-                            padding: "4px 8px",
-                            borderRadius: "6px",
-                            fontSize: "11px",
-                            fontWeight: 700,
-                            cursor: "pointer",
-                        }}
-                    >
-                        ✕ Remove
-                    </button>
+                {isAdmin && !isMain && (
+                    <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+                        {/* Admin Mute Button for speaking participants */}
+                        {profile?.canSpeak && onMuteParticipant && (
+                            <button
+                                onClick={() => onMuteParticipant(peerId)}
+                                title="Close / Mute this user's microphone"
+                                style={{
+                                    background: "rgba(239, 68, 68, 0.9)",
+                                    color: "#fff",
+                                    border: "none",
+                                    padding: "3px 8px",
+                                    borderRadius: "6px",
+                                    fontSize: "11px",
+                                    fontWeight: 700,
+                                    cursor: "pointer",
+                                }}
+                            >
+                                🔇 Mute
+                            </button>
+                        )}
+
+                        {/* Admin Allow Mic button if participant requested to speak */}
+                        {isSpeakRequested && onAllowSpeak && (
+                            <button
+                                onClick={() => onAllowSpeak(peerId)}
+                                title="Allow this user to speak"
+                                style={{
+                                    background: "rgba(22, 163, 74, 0.9)",
+                                    color: "#fff",
+                                    border: "none",
+                                    padding: "3px 8px",
+                                    borderRadius: "6px",
+                                    fontSize: "11px",
+                                    fontWeight: 700,
+                                    cursor: "pointer",
+                                }}
+                            >
+                                ✋ Allow Mic
+                            </button>
+                        )}
+
+                        {onRemove && (
+                            <button
+                                onClick={() => onRemove(peerId)}
+                                title="Remove user from meeting"
+                                style={{
+                                    background: "rgba(71, 85, 105, 0.9)",
+                                    color: "#fff",
+                                    border: "none",
+                                    padding: "3px 8px",
+                                    borderRadius: "6px",
+                                    fontSize: "11px",
+                                    fontWeight: 700,
+                                    cursor: "pointer",
+                                }}
+                            >
+                                ✕
+                            </button>
+                        )}
+                    </div>
                 )}
             </div>
 
@@ -249,12 +415,12 @@ function RemoteVideo({
                     width: "100%",
                     height: "100%",
                     objectFit: isMain ? "contain" : "cover",
-                    display: isVideoOff ? "none" : "block",
+                    display: (!isMain && isVideoOff) ? "none" : "block",
                 }}
             />
 
-            {/* Email Avatar Card when Video is Off */}
-            {isVideoOff && (
+            {/* Email Avatar Card when Video is Off (ONLY for camera tiles, NEVER for screen presentation) */}
+            {!isMain && isVideoOff && (
                 <div
                     style={{
                         width: "100%",
@@ -311,6 +477,10 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
     const [isAdmin, setIsAdmin] = useState(false);
     const [joinStatus, setJoinStatus] = useState<"loading" | "waiting" | "approved" | "denied">("loading");
     const [joinRequests, setJoinRequests] = useState<JoinRequest[]>([]);
+    const [speakRequests, setSpeakRequests] = useState<SpeakRequest[]>([]);
+    const [canSpeak, setCanSpeak] = useState(false);
+    const [speakRequestPending, setSpeakRequestPending] = useState(false);
+    const [speakNotice, setSpeakNotice] = useState<string | null>(null);
 
     const [myStream, setMyStream] = useState<MediaStream | null>(null);
     const [remoteStreams, setRemoteStreams] = useState<RemoteStreams>({});
@@ -322,6 +492,8 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
     const [isSharing, setIsSharing] = useState(false);
     const [canShareScreen, setCanShareScreen] = useState(true);
     const [screenSharerId, setScreenSharerId] = useState<string | null>(null);
+    const [facingMode, setFacingMode] = useState<"user" | "environment">("user");
+    const [isMobile, setIsMobile] = useState(false);
 
     // Ephemeral Chat state
     const [isChatOpen, setIsChatOpen] = useState(false);
@@ -332,6 +504,8 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
     const [copied, setCopied] = useState(false);
 
     const localVideoRef = useRef<HTMLVideoElement | null>(null);
+    const screenVideoRef = useRef<HTMLVideoElement | null>(null);
+    const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
     const myStreamRef = useRef<MediaStream | null>(null);
     const peersRef = useRef<PeerConnections>({});
     const iceQueuesRef = useRef<IceQueues>({});
@@ -340,6 +514,13 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
 
     useEffect(() => {
         setMounted(true);
+        if (typeof navigator !== "undefined") {
+            setCanShareScreen(Boolean(navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === "function"));
+            setIsMobile(
+                /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) ||
+                (typeof window !== "undefined" && window.innerWidth <= 768)
+            );
+        }
     }, []);
 
     // Ensure local stream is always attached to localVideoRef
@@ -348,7 +529,15 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
             localVideoRef.current.srcObject = myStream;
             localVideoRef.current.play().catch(() => { });
         }
-    }, [myStream]);
+    }, [myStream, screenSharerId, isSharing, isVideoOff]);
+
+    // Ensure local screen share stream is attached to screenVideoRef
+    useEffect(() => {
+        if (screenVideoRef.current && screenStream) {
+            screenVideoRef.current.srcObject = screenStream;
+            screenVideoRef.current.play().catch(() => { });
+        }
+    }, [screenStream, isSharing]);
 
     // 1. Initial Backend Auth & Meeting Validation
     useEffect(() => {
@@ -370,7 +559,10 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                 if (meetRes.ok) {
                     const meetData = await meetRes.json();
                     meetingIsAdmin = Boolean(meetData.isAdmin);
-                    if (meetingIsAdmin) setIsAdmin(true);
+                    if (meetingIsAdmin) {
+                        setIsAdmin(true);
+                        setCanSpeak(true);
+                    }
                 }
 
                 // Request admission via socket
@@ -396,37 +588,55 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
     }, [socket]);
 
     // Acquire Camera stream once approved
-    const getCamera = useCallback(async () => {
-        if (myStreamRef.current && myStreamRef.current.active) return myStreamRef.current;
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-            myStreamRef.current = stream;
-            setMyStream(stream);
-            setPermissionBlocked(false);
-            setIsVideoOff(false);
-            if (localVideoRef.current) {
-                localVideoRef.current.srcObject = stream;
-                localVideoRef.current.play().catch(() => { });
+    const getCamera = useCallback(async (targetFacing: "user" | "environment" = facingMode) => {
+        if (
+            myStreamRef.current &&
+            myStreamRef.current.active &&
+            myStreamRef.current.getVideoTracks().some((t) => t.readyState === "live" && !(t as any).__isFallback)
+        ) {
+            return myStreamRef.current;
+        }
+
+        const { stream, hasVideo, hasAudio } = await acquireUserMedia(targetFacing);
+
+        if (!hasVideo) {
+            // Attach a silent fallback video track so RTCPeerConnection ALWAYS has a video sender ready to be replaced later
+            const fallback = createFallbackStream();
+            const fallbackTrack = fallback?.getVideoTracks()[0];
+            if (fallbackTrack) {
+                fallbackTrack.enabled = false;
+                stream.addTrack(fallbackTrack);
             }
-            return stream;
-        } catch {
-            // Camera/Mic blocked by browser: do NOT crash, show email avatar instead!
             setPermissionBlocked(true);
             setIsVideoOff(true);
-            try {
-                const audioOnly = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-                myStreamRef.current = audioOnly;
-                setMyStream(audioOnly);
-                return audioOnly;
-            } catch {
-                // Both video and audio blocked: use fallback stream so user joins and email avatar displays
-                const fallback = createFallbackStream();
-                myStreamRef.current = fallback;
-                setMyStream(fallback);
-                return fallback;
-            }
+        } else {
+            setPermissionBlocked(false);
+            setIsVideoOff(false);
         }
-    }, []);
+
+        // Host has mic open by default; participants join with mic muted and locked unless granted speaking permission
+        const allowedToSpeak = isAdmin || canSpeak;
+        if (!allowedToSpeak) {
+            stream.getAudioTracks().forEach((t) => {
+                t.enabled = false;
+            });
+            setIsMuted(true);
+        } else if (!hasAudio) {
+            setIsMuted(true);
+        } else {
+            setIsMuted(false);
+        }
+
+        myStreamRef.current = stream;
+        setMyStream(stream);
+
+        if (localVideoRef.current) {
+            localVideoRef.current.srcObject = stream;
+            localVideoRef.current.play().catch(() => { });
+        }
+
+        return stream;
+    }, [facingMode, isAdmin, canSpeak]);
 
     useEffect(() => {
         if (joinStatus === "approved") {
@@ -454,6 +664,56 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
         // Admin receives join requests
         const onJoinRequest = (req: JoinRequest) => {
             setJoinRequests((prev) => [...prev.filter((r) => r.socketId !== req.socketId), req]);
+        };
+
+        // Admin receives speaking requests
+        const onSpeakRequest = (req: SpeakRequest) => {
+            setSpeakRequests((prev) => [...prev.filter((r) => r.socketId !== req.socketId), req]);
+        };
+
+        const onSpeakRequestCancelled = ({ socketId }: { socketId: string }) => {
+            setSpeakRequests((prev) => prev.filter((r) => r.socketId !== socketId));
+        };
+
+        // Participant is granted speaking permission by Admin
+        const onSpeakAllowed = () => {
+            setCanSpeak(true);
+            setSpeakRequestPending(false);
+            const stream = myStreamRef.current;
+            if (stream) {
+                stream.getAudioTracks().forEach((t) => (t.enabled = true));
+            }
+            setIsMuted(false);
+            setSpeakNotice("Host allowed you to speak. Your mic is now active.");
+            setTimeout(() => setSpeakNotice(null), 5000);
+        };
+
+        // Participant's speak request was denied by Admin
+        const onSpeakDenied = () => {
+            setSpeakRequestPending(false);
+            setSpeakNotice("Host declined your request to speak.");
+            setTimeout(() => setSpeakNotice(null), 5000);
+        };
+
+        // Admin closed/muted participant's microphone
+        const onAdminMuted = () => {
+            setCanSpeak(false);
+            setSpeakRequestPending(false);
+            const stream = myStreamRef.current;
+            if (stream) {
+                stream.getAudioTracks().forEach((t) => (t.enabled = false));
+            }
+            setIsMuted(true);
+            setSpeakNotice("Host has muted your microphone.");
+            setTimeout(() => setSpeakNotice(null), 5000);
+        };
+
+        // Broadcast of any peer's speaking permission state
+        const onUserSpeakState = ({ socketId, canSpeak: peerCanSpeak }: { socketId: string; canSpeak: boolean }) => {
+            setRemoteProfiles((prev) => ({
+                ...prev,
+                [socketId]: { ...prev[socketId], canSpeak: peerCanSpeak },
+            }));
         };
 
         // Chat messages (Volatile UDP-like, not stored in DB)
@@ -491,6 +751,12 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
         socket.on("join-denied", onJoinDenied);
         socket.on("removed-by-admin", onRemovedByAdmin);
         socket.on("join-request", onJoinRequest);
+        socket.on("speak-request", onSpeakRequest);
+        socket.on("speak-request-cancelled", onSpeakRequestCancelled);
+        socket.on("speak-allowed", onSpeakAllowed);
+        socket.on("speak-denied", onSpeakDenied);
+        socket.on("admin-muted", onAdminMuted);
+        socket.on("user-speak-state", onUserSpeakState);
         socket.on("receive-message", onReceiveMessage);
         socket.on("user-video-state", onUserVideoState);
         socket.on("all-profiles", onAllProfiles);
@@ -503,6 +769,12 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
             socket.off("join-denied", onJoinDenied);
             socket.off("removed-by-admin", onRemovedByAdmin);
             socket.off("join-request", onJoinRequest);
+            socket.off("speak-request", onSpeakRequest);
+            socket.off("speak-request-cancelled", onSpeakRequestCancelled);
+            socket.off("speak-allowed", onSpeakAllowed);
+            socket.off("speak-denied", onSpeakDenied);
+            socket.off("admin-muted", onAdminMuted);
+            socket.off("user-speak-state", onUserSpeakState);
             socket.off("receive-message", onReceiveMessage);
             socket.off("user-video-state", onUserVideoState);
             socket.off("all-profiles", onAllProfiles);
@@ -521,7 +793,15 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
 
             activeStream.getAudioTracks().forEach((track) => pc.addTrack(track, activeStream));
             const videoTrack = screenTrackRef.current || activeStream.getVideoTracks()[0];
-            if (videoTrack) pc.addTrack(videoTrack, activeStream);
+            if (videoTrack) {
+                pc.addTrack(videoTrack, activeStream);
+            } else {
+                try {
+                    pc.addTransceiver("video", { direction: "sendrecv" });
+                } catch (e) {
+                    console.warn("Could not add video transceiver:", e);
+                }
+            }
 
             pc.onicecandidate = (event) => {
                 if (event.candidate && socket) {
@@ -531,13 +811,10 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
 
             pc.ontrack = (event) => {
                 const incomingStream = event.streams?.[0] || new MediaStream([event.track]);
-                setRemoteStreams((prev) => {
-                    const existing = prev[targetId];
-                    if (existing && event.streams?.[0] && existing.id === event.streams[0].id) {
-                        return prev;
-                    }
-                    return { ...prev, [targetId]: incomingStream };
-                });
+                setRemoteStreams((prev) => ({
+                    ...prev,
+                    [targetId]: incomingStream,
+                }));
             };
 
             peersRef.current[targetId] = pc;
@@ -555,7 +832,7 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
             isVideoOff ||
             permissionBlocked ||
             !myStream?.getVideoTracks().length ||
-            !myStream.getVideoTracks().some((t) => t.enabled);
+            !myStream.getVideoTracks().some((t) => t.enabled && !(t as any).__isFallback);
 
         socket.emit("joined-room", {
             roomId,
@@ -592,7 +869,7 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
         const onReceiveOffer = async ({ from, offer }: any) => {
             const activeStream = myStreamRef.current;
             if (!activeStream) return;
-            let pc = peersRef.current[from] || createPeer(from, activeStream);
+            const pc = peersRef.current[from] || createPeer(from, activeStream);
             await pc.setRemoteDescription(new RTCSessionDescription(offer));
 
             // Flush any queued ICE candidates that arrived before the offer
@@ -676,17 +953,143 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
     }, [socket, roomId]);
 
     // Toggles
-    const toggleVideo = () => {
+    const toggleVideo = async () => {
+        const stream = myStreamRef.current || myStream;
+        const nextState = !isVideoOff; // true = turn off, false = turn on
+
+        if (nextState) {
+            // Turning OFF video
+            if (stream) {
+                stream.getVideoTracks().forEach((t) => {
+                    t.enabled = false;
+                });
+            }
+            setIsVideoOff(true);
+            socket?.emit("toggle-video-state", { isVideoOff: true, roomId });
+        } else {
+            // Turning ON video
+            let liveTrack = stream?.getVideoTracks().find((t) => t.readyState === "live" && !(t as any).__isFallback);
+
+            // If no active real camera track exists (e.g. mobile was audio-only initially or track was stopped)
+            if (!liveTrack) {
+                try {
+                    let newVideoStream: MediaStream | null = null;
+                    try {
+                        newVideoStream = await navigator.mediaDevices.getUserMedia({
+                            video: { facingMode: { ideal: facingMode } },
+                        });
+                    } catch {
+                        newVideoStream = await navigator.mediaDevices.getUserMedia({ video: true });
+                    }
+
+                    const newTrack = newVideoStream?.getVideoTracks()[0];
+                    if (newTrack) {
+                        liveTrack = newTrack;
+                        if (stream) {
+                            // Stop and remove old or fallback video tracks
+                            stream.getVideoTracks().forEach((oldTrack) => {
+                                oldTrack.stop();
+                                stream.removeTrack(oldTrack);
+                            });
+                            stream.addTrack(newTrack);
+                        } else {
+                            const newStream = new MediaStream([newTrack]);
+                            myStreamRef.current = newStream;
+                            setMyStream(newStream);
+                        }
+                    }
+                } catch (err) {
+                    console.error("Camera access failed on toggle:", err);
+                    alert("Could not access camera. Please check your camera permissions in your mobile browser settings.");
+                    return;
+                }
+            }
+
+            if (liveTrack) {
+                liveTrack.enabled = true;
+                setPermissionBlocked(false);
+                setIsVideoOff(false);
+
+                // Update local video element
+                const activeStream = myStreamRef.current || stream;
+                if (localVideoRef.current && activeStream) {
+                    localVideoRef.current.srcObject = activeStream;
+                    localVideoRef.current.play().catch(() => { });
+                }
+
+                // Update all peers with the active video track if not sharing screen
+                if (!isSharing) {
+                    Object.values(peersRef.current).forEach((pc) => {
+                        const sender = pc.getSenders().find((s) => s.track?.kind === "video" || (s as any).kind === "video");
+                        if (sender) {
+                            sender.replaceTrack(liveTrack!).catch((e) => console.error("replaceTrack error:", e));
+                        } else if (activeStream) {
+                            try {
+                                pc.addTrack(liveTrack!, activeStream);
+                            } catch (e) {
+                                console.error("addTrack error:", e);
+                            }
+                        }
+                    });
+                }
+
+                socket?.emit("toggle-video-state", { isVideoOff: false, roomId });
+            }
+        }
+    };
+
+    const flipCamera = async () => {
+        const nextMode = facingMode === "user" ? "environment" : "user";
+        setFacingMode(nextMode);
+
         const stream = myStreamRef.current || myStream;
         if (!stream) return;
-        const nextState = !isVideoOff;
-        stream.getVideoTracks().forEach((t) => (t.enabled = !nextState));
-        setIsVideoOff(nextState);
 
-        socket?.emit("toggle-video-state", { isVideoOff: nextState, roomId });
+        try {
+            let newStream: MediaStream | null = null;
+            try {
+                newStream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: { exact: nextMode } },
+                });
+            } catch {
+                newStream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: { ideal: nextMode } },
+                });
+            }
+
+            const newTrack = newStream?.getVideoTracks()[0];
+            if (!newTrack) return;
+
+            stream.getVideoTracks().forEach((t) => {
+                t.stop();
+                stream.removeTrack(t);
+            });
+            stream.addTrack(newTrack);
+
+            if (localVideoRef.current) {
+                localVideoRef.current.srcObject = stream;
+                localVideoRef.current.play().catch(() => { });
+            }
+
+            Object.values(peersRef.current).forEach((pc) => {
+                const sender = pc.getSenders().find((s) => s.track?.kind === "video" || (s as any).kind === "video");
+                sender?.replaceTrack(newTrack).catch((e) => console.error("Flip camera replaceTrack error:", e));
+            });
+
+            setIsVideoOff(false);
+            setPermissionBlocked(false);
+            socket?.emit("toggle-video-state", { isVideoOff: false, roomId });
+        } catch (err) {
+            console.error("Failed to flip camera:", err);
+            setFacingMode(facingMode);
+        }
     };
 
     const toggleMic = () => {
+        if (!isAdmin && !canSpeak) {
+            handleRequestToSpeak();
+            return;
+        }
         const stream = myStreamRef.current || myStream;
         if (!stream) return;
         stream.getAudioTracks().forEach((t) => (t.enabled = !t.enabled));
@@ -695,22 +1098,36 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
 
     // Screen sharing
     const stopScreenShare = useCallback(() => {
-        const cameraTrack = myStreamRef.current?.getVideoTracks()[0];
-        if (screenTrackRef.current && cameraTrack) {
+        const cameraTrack = myStreamRef.current?.getVideoTracks().find((t) => !(t as any).__isFallback);
+        if (screenTrackRef.current) {
             Object.values(peersRef.current).forEach((pc) => {
-                const sender = pc.getSenders().find((s) => s.track?.kind === "video");
-                sender?.replaceTrack(cameraTrack).catch(() => { });
+                const sender = pc.getSenders().find((s) => s.track?.kind === "video" || (s as any).kind === "video");
+                if (sender) {
+                    if (cameraTrack && !isVideoOff) {
+                        sender.replaceTrack(cameraTrack).catch(() => { });
+                    } else {
+                        const fallback = createFallbackStream();
+                        const fallbackTrack = fallback?.getVideoTracks()[0];
+                        if (fallbackTrack) {
+                            fallbackTrack.enabled = false;
+                            sender.replaceTrack(fallbackTrack).catch(() => { });
+                        }
+                    }
+                }
             });
         }
         screenTrackRef.current?.stop();
         screenTrackRef.current = null;
-        socket?.emit("stop-screen-share", { roomId });
-        if (localVideoRef.current && myStreamRef.current) {
-            localVideoRef.current.srcObject = myStreamRef.current;
+
+        if (screenStream) {
+            screenStream.getTracks().forEach((t) => t.stop());
         }
+        setScreenStream(null);
+
+        socket?.emit("stop-screen-share", { roomId });
         setIsSharing(false);
         setScreenSharerId((prev) => (prev === socket?.id || prev === "me" ? null : prev));
-    }, [socket, roomId]);
+    }, [socket, roomId, screenStream, isVideoOff]);
 
     const startScreenShare = useCallback(async () => {
         try {
@@ -719,15 +1136,28 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
             if (!screenTrack) return;
 
             await Promise.all(
-                Object.values(peersRef.current).map((pc) => {
-                    const sender = pc.getSenders().find((s) => s.track?.kind === "video");
-                    return sender?.replaceTrack(screenTrack);
+                Object.entries(peersRef.current).map(async ([peerId, pc]) => {
+                    const sender = pc.getSenders().find((s) => s.track?.kind === "video" || (s as any).kind === "video");
+                    if (sender) {
+                        return sender.replaceTrack(screenTrack);
+                    } else {
+                        try {
+                            pc.addTrack(screenTrack, screen);
+                            const offer = await pc.createOffer();
+                            await pc.setLocalDescription(offer);
+                            socket?.emit("send-offer", { to: peerId, offer });
+                        } catch (e) {
+                            console.error("addTrack/renegotiate error:", e);
+                        }
+                    }
                 })
             );
 
             screenTrackRef.current = screenTrack;
-            screenTrack.onended = stopScreenShare;
-            if (localVideoRef.current) localVideoRef.current.srcObject = screen;
+            screenTrack.onended = () => {
+                stopScreenShare();
+            };
+            setScreenStream(screen);
             setIsSharing(true);
             setScreenSharerId(socket?.id || "me");
             socket?.emit("request-screen-share", { roomId });
@@ -745,6 +1175,42 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
     const handleDenyJoin = (targetSocketId: string) => {
         socket?.emit("deny-join", { targetSocketId, roomId });
         setJoinRequests((prev) => prev.filter((r) => r.socketId !== targetSocketId));
+    };
+
+    // Speaking permission handlers
+    const handleRequestToSpeak = () => {
+        if (!socket) return;
+        socket.emit("request-to-speak", {
+            roomId,
+            name: user?.name || user?.email || "Participant",
+            email: user?.email || "Participant",
+        });
+        setSpeakRequestPending(true);
+        setSpeakNotice("Request to speak sent to Host. Please wait for approval...");
+    };
+
+    const handleCancelSpeakRequest = () => {
+        if (!socket) return;
+        socket.emit("cancel-speak-request", { roomId });
+        setSpeakRequestPending(false);
+        setSpeakNotice(null);
+    };
+
+    const handleAllowSpeak = (targetSocketId: string) => {
+        if (!socket) return;
+        socket.emit("allow-speak", { targetSocketId, roomId });
+        setSpeakRequests((prev) => prev.filter((r) => r.socketId !== targetSocketId));
+    };
+
+    const handleDenySpeak = (targetSocketId: string) => {
+        if (!socket) return;
+        socket.emit("deny-speak", { targetSocketId, roomId });
+        setSpeakRequests((prev) => prev.filter((r) => r.socketId !== targetSocketId));
+    };
+
+    const handleRevokeSpeak = (targetSocketId: string) => {
+        if (!socket) return;
+        socket.emit("revoke-speak", { targetSocketId, roomId });
     };
 
     // Admin Remove Participant
@@ -915,6 +1381,104 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                 </div>
             )}
 
+            {/* Admin Speak Requests Banner */}
+            {isAdmin && speakRequests.length > 0 && (
+                <div
+                    style={{
+                        position: "fixed",
+                        top: joinRequests.length > 0 ? "76px" : "16px",
+                        left: "50%",
+                        transform: "translateX(-50%)",
+                        zIndex: 50,
+                        background: "#0f172a",
+                        color: "#fff",
+                        padding: "12px 20px",
+                        borderRadius: "12px",
+                        boxShadow: "0 10px 25px rgba(0,0,0,0.35)",
+                        border: "1px solid #3b82f6",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "16px",
+                        maxWidth: "90vw",
+                    }}
+                >
+                    <span style={{ fontSize: "14px", fontWeight: 600 }}>
+                        🎤 <strong>{speakRequests[0].name}</strong> ({speakRequests[0].email}) wants to speak
+                    </span>
+                    <div style={{ display: "flex", gap: "8px" }}>
+                        <button
+                            onClick={() => handleAllowSpeak(speakRequests[0].socketId)}
+                            style={{
+                                background: "#16a34a",
+                                color: "#fff",
+                                border: "none",
+                                padding: "6px 14px",
+                                borderRadius: "6px",
+                                fontSize: "12px",
+                                fontWeight: 700,
+                                cursor: "pointer",
+                            }}
+                        >
+                            ✓ Allow Mic
+                        </button>
+                        <button
+                            onClick={() => handleDenySpeak(speakRequests[0].socketId)}
+                            style={{
+                                background: "#dc2626",
+                                color: "#fff",
+                                border: "none",
+                                padding: "6px 14px",
+                                borderRadius: "6px",
+                                fontSize: "12px",
+                                fontWeight: 700,
+                                cursor: "pointer",
+                            }}
+                        >
+                            ✕ Deny
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {/* Participant Speak Notification Toast */}
+            {speakNotice && (
+                <div
+                    style={{
+                        position: "fixed",
+                        bottom: "90px",
+                        left: "50%",
+                        transform: "translateX(-50%)",
+                        zIndex: 50,
+                        background: "#1e293b",
+                        color: "#fff",
+                        padding: "10px 18px",
+                        borderRadius: "8px",
+                        boxShadow: "0 4px 14px rgba(0,0,0,0.25)",
+                        border: "1px solid #3b82f6",
+                        fontSize: "13px",
+                        fontWeight: 600,
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "12px",
+                    }}
+                >
+                    <span>{speakNotice}</span>
+                    <button
+                        onClick={() => setSpeakNotice(null)}
+                        style={{
+                            background: "transparent",
+                            border: "none",
+                            color: "#94a3b8",
+                            cursor: "pointer",
+                            fontSize: "14px",
+                            fontWeight: 700,
+                        }}
+                    >
+                        ✕
+                    </button>
+                </div>
+            )}
+
             {/* Meeting Top Bar */}
             <div
                 style={{
@@ -979,21 +1543,6 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                     >
                         {copied ? "✓ Copied!" : "📋 Copy Link"}
                     </button>
-                    <button
-                        onClick={() => router.push("/dashboard")}
-                        style={{
-                            padding: "6px 12px",
-                            borderRadius: "6px",
-                            border: "1px solid #cbd5e1",
-                            background: "#fff",
-                            cursor: "pointer",
-                            fontSize: "12px",
-                            fontWeight: 600,
-                            color: "#334155",
-                        }}
-                    >
-                        Dashboard
-                    </button>
                 </div>
             </div>
 
@@ -1001,7 +1550,7 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
             <div style={{ display: "flex", gap: "20px", alignItems: "start" }}>
                 {/* Videos Container */}
                 <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "16px", minWidth: 0 }}>
-                    {isSharing || (screenSharerId && screenSharerId !== socket?.id && remoteStreams[screenSharerId]) ? (
+                    {isSharing || (screenSharerId && screenSharerId !== socket?.id) ? (
                         <>
                             {/* Main Presentation Stage */}
                             <div style={{ width: "100%", display: "flex", justifyContent: "center" }}>
@@ -1026,7 +1575,7 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                                             🖥️ You are sharing your screen
                                         </div>
                                         <video
-                                            ref={localVideoRef}
+                                            ref={screenVideoRef}
                                             autoPlay
                                             playsInline
                                             muted
@@ -1073,9 +1622,13 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                                                 fontWeight: 600,
                                                 padding: "2px 6px",
                                                 borderRadius: "4px",
+                                                display: "flex",
+                                                alignItems: "center",
+                                                gap: "4px",
                                             }}
                                         >
-                                            You ({user?.email || "Me"})
+                                            <span>You ({user?.email || "Me"})</span>
+                                            <span>{isAdmin ? "👑 Host" : (canSpeak ? (isMuted ? "🔇" : "🎤") : "🔇 Locked")}</span>
                                         </div>
 
                                         <video
@@ -1087,11 +1640,11 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                                                 width: "100%",
                                                 height: "100%",
                                                 objectFit: "cover",
-                                                display: (isVideoOff || permissionBlocked || !myStream?.getVideoTracks().some((t) => t.enabled)) ? "none" : "block",
+                                                display: (isVideoOff || permissionBlocked || !myStream?.getVideoTracks().some((t) => t.enabled && !(t as any).__isFallback)) ? "none" : "block",
                                             }}
                                         />
 
-                                        {(isVideoOff || permissionBlocked || !myStream || !myStream.getVideoTracks().some((t) => t.enabled)) && (
+                                        {(isVideoOff || permissionBlocked || !myStream || !myStream.getVideoTracks().some((t) => t.enabled && !(t as any).__isFallback)) && (
                                             <div
                                                 style={{
                                                     width: "100%",
@@ -1142,6 +1695,9 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                                             profile={remoteProfiles[peerId]}
                                             isAdmin={isAdmin}
                                             onRemove={handleRemoveParticipant}
+                                            onMuteParticipant={handleRevokeSpeak}
+                                            onAllowSpeak={handleAllowSpeak}
+                                            isSpeakRequested={speakRequests.some((r) => r.socketId === peerId)}
                                         />
                                     ))}
                             </div>
@@ -1163,9 +1719,13 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                                         fontWeight: 600,
                                         padding: "3px 8px",
                                         borderRadius: "6px",
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: "6px",
                                     }}
                                 >
-                                    You ({user?.email || "Me"}) {isAdmin ? "👑" : ""}
+                                    <span>You ({user?.email || "Me"})</span>
+                                    <span>{isAdmin ? "👑 Host" : (canSpeak ? (isMuted ? "🔇" : "🎤") : "🔇 Locked")}</span>
                                 </div>
 
                                 <video
@@ -1177,11 +1737,11 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                                         width: "100%",
                                         height: "100%",
                                         objectFit: "cover",
-                                        display: (isVideoOff || permissionBlocked || !myStream?.getVideoTracks().some((t) => t.enabled)) ? "none" : "block",
+                                        display: (isVideoOff || permissionBlocked || !myStream?.getVideoTracks().some((t) => t.enabled && !(t as any).__isFallback)) ? "none" : "block",
                                     }}
                                 />
 
-                                {(isVideoOff || permissionBlocked || !myStream || !myStream.getVideoTracks().some((t) => t.enabled)) && (
+                                {(isVideoOff || permissionBlocked || !myStream || !myStream.getVideoTracks().some((t) => t.enabled && !(t as any).__isFallback)) && (
                                     <div
                                         style={{
                                             width: "100%",
@@ -1233,6 +1793,9 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                                     profile={remoteProfiles[peerId]}
                                     isAdmin={isAdmin}
                                     onRemove={handleRemoveParticipant}
+                                    onMuteParticipant={handleRevokeSpeak}
+                                    onAllowSpeak={handleAllowSpeak}
+                                    isSpeakRequested={speakRequests.some((r) => r.socketId === peerId)}
                                 />
                             ))}
                         </div>
@@ -1411,41 +1974,102 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                     {isVideoOff ? "Video Off" : "Video On"}
                 </button>
 
-                {/* Mic Toggle Button (Icon + Label) */}
-                <button
-                    onClick={toggleMic}
-                    style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "8px",
-                        padding: "10px 18px",
-                        borderRadius: "12px",
-                        border: "none",
-                        cursor: "pointer",
-                        fontWeight: 600,
-                        fontSize: "13px",
-                        color: "#fff",
-                        background: isMuted ? "#ef4444" : "#2563eb",
-                        transition: "all 0.2s",
-                    }}
-                >
-                    {isMuted ? (
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                            <line x1="1" y1="1" x2="23" y2="23"></line>
-                            <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"></path>
-                            <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"></path>
-                            <line x1="12" y1="19" x2="12" y2="23"></line>
+                {/* Flip Camera Button (Mobile only, active when video is on) */}
+                {isMobile && !isVideoOff && (
+                    <button
+                        onClick={flipCamera}
+                        title="Switch Front / Rear Camera"
+                        style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "8px",
+                            padding: "10px 18px",
+                            borderRadius: "12px",
+                            border: "none",
+                            cursor: "pointer",
+                            fontWeight: 600,
+                            fontSize: "13px",
+                            color: "#fff",
+                            background: "#475569",
+                            transition: "all 0.2s",
+                        }}
+                    >
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M1 4v6h6" />
+                            <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
                         </svg>
-                    ) : (
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
-                            <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
-                            <line x1="12" y1="19" x2="12" y2="23"></line>
-                            <line x1="8" y1="23" x2="16" y2="23"></line>
-                        </svg>
-                    )}
-                    {isMuted ? "Mic Off" : "Mic On"}
-                </button>
+                        Flip Cam
+                    </button>
+                )}
+
+                {/* Mic Control: Request to Speak for participants without mic access, or Mic Toggle for Host / Approved speakers */}
+                {!isAdmin && !canSpeak ? (
+                    <button
+                        onClick={speakRequestPending ? handleCancelSpeakRequest : handleRequestToSpeak}
+                        title={speakRequestPending ? "Cancel your request to speak" : "Ask Host permission to unmute mic"}
+                        style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "8px",
+                            padding: "10px 18px",
+                            borderRadius: "12px",
+                            border: "none",
+                            cursor: "pointer",
+                            fontWeight: 600,
+                            fontSize: "13px",
+                            color: "#fff",
+                            background: speakRequestPending ? "#d97706" : "#64748b",
+                            transition: "all 0.2s",
+                        }}
+                    >
+                        {speakRequestPending ? (
+                            <>
+                                <span>⏳</span>
+                                <span>Request Sent (Cancel)</span>
+                            </>
+                        ) : (
+                            <>
+                                <span>✋</span>
+                                <span>Request to Speak</span>
+                            </>
+                        )}
+                    </button>
+                ) : (
+                    <button
+                        onClick={toggleMic}
+                        style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "8px",
+                            padding: "10px 18px",
+                            borderRadius: "12px",
+                            border: "none",
+                            cursor: "pointer",
+                            fontWeight: 600,
+                            fontSize: "13px",
+                            color: "#fff",
+                            background: isMuted ? "#ef4444" : "#2563eb",
+                            transition: "all 0.2s",
+                        }}
+                    >
+                        {isMuted ? (
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <line x1="1" y1="1" x2="23" y2="23"></line>
+                                <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"></path>
+                                <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"></path>
+                                <line x1="12" y1="19" x2="12" y2="23"></line>
+                            </svg>
+                        ) : (
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                                <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                                <line x1="12" y1="19" x2="12" y2="23"></line>
+                                <line x1="8" y1="23" x2="16" y2="23"></line>
+                            </svg>
+                        )}
+                        {isMuted ? "Mic Off" : "Mic On"}
+                    </button>
+                )}
 
                 {/* Share Screen Button (Icon + Label) */}
                 <button
