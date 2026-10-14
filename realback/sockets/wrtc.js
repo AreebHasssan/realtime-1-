@@ -1,20 +1,40 @@
 function setupSocket(io) {
     const screenSharers = new Map();
     const roomAdmins = new Map(); // roomId -> { socketId, name, email }
-    const userProfiles = new Map(); // socketId -> { email, name, roomId, isVideoOff }
+    const userProfiles = new Map(); // socketId -> { email, name, roomId, isVideoOff, canSpeak }
+    const pendingJoinRequests = new Map(); // roomId -> [{ socketId, email, name }]
 
     io.on("connection", (socket) => {
         let currentRoom = null;
 
         // Peer requests to join room (Admin acceptance flow)
-        // Peer requests to join room (admit directly into the meeting)
-        socket.on("request-join", () => {
-            socket.emit("join-approved");
+        socket.on("request-join", (data) => {
+            const roomId = typeof data === "string" ? data : (data?.roomId || "room");
+            const email = data?.email || "Guest";
+            const name = data?.name || email;
+            const isAdmin = Boolean(data?.isAdmin);
+            const admin = roomAdmins.get(roomId);
+
+            if (isAdmin || admin?.socketId === socket.id) {
+                socket.emit("join-approved");
+            } else if (admin) {
+                io.to(admin.socketId).emit("join-request", { socketId: socket.id, email, name });
+            } else {
+                // If admin hasn't joined socket yet, queue the knock so admin sees it immediately upon arrival
+                const pending = pendingJoinRequests.get(roomId) || [];
+                if (!pending.some((p) => p.socketId === socket.id)) {
+                    pending.push({ socketId: socket.id, email, name });
+                    pendingJoinRequests.set(roomId, pending);
+                }
+            }
         });
 
         // Admin accepts join request
         socket.on("accept-join", ({ targetSocketId, roomId }) => {
             if (roomAdmins.get(roomId)?.socketId === socket.id) {
+                // Remove from pending if present
+                const pending = pendingJoinRequests.get(roomId) || [];
+                pendingJoinRequests.set(roomId, pending.filter((p) => p.socketId !== targetSocketId));
                 io.to(targetSocketId).emit("join-approved");
             }
         });
@@ -22,6 +42,8 @@ function setupSocket(io) {
         // Admin denies join request
         socket.on("deny-join", ({ targetSocketId, roomId }) => {
             if (roomAdmins.get(roomId)?.socketId === socket.id) {
+                const pending = pendingJoinRequests.get(roomId) || [];
+                pendingJoinRequests.set(roomId, pending.filter((p) => p.socketId !== targetSocketId));
                 io.to(targetSocketId).emit("join-denied");
             }
         });
@@ -140,6 +162,12 @@ function setupSocket(io) {
 
             if (isAdmin) {
                 roomAdmins.set(roomId, { socketId: socket.id, name: userName, email: userEmail });
+                const pending = pendingJoinRequests.get(roomId) || [];
+                if (pending.length > 0) {
+                    pending.forEach((req) => {
+                        io.to(socket.id).emit("join-request", req);
+                    });
+                }
             }
 
             // Get all other active peers in room with their profiles
@@ -261,6 +289,14 @@ function setupSocket(io) {
                 io.to(currentRoom).emit("user-left", socket.id);
             }
             userProfiles.delete(socket.id);
+            for (const [rId, reqs] of pendingJoinRequests.entries()) {
+                const remaining = reqs.filter((r) => r.socketId !== socket.id);
+                if (remaining.length > 0) {
+                    pendingJoinRequests.set(rId, remaining);
+                } else {
+                    pendingJoinRequests.delete(rId);
+                }
+            }
         });
     });
 }

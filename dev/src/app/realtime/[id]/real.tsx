@@ -598,10 +598,25 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                     }
                 }
 
-                // Direct admission into the room: participants enter with mic locked by default
-                setJoinStatus("approved");
+                if (meetingIsAdmin) {
+                    setJoinStatus("approved");
+                } else {
+                    setJoinStatus("waiting");
+                    socket?.emit("request-join", {
+                        roomId,
+                        email: currentUser?.email || "Guest",
+                        name: currentUser?.name || currentUser?.email || "Guest",
+                        isAdmin: false,
+                    });
+                }
             } catch {
-                setJoinStatus("approved");
+                setJoinStatus("waiting");
+                socket?.emit("request-join", {
+                    roomId,
+                    email: "Guest",
+                    name: "Guest",
+                    isAdmin: false,
+                });
             }
         };
 
@@ -833,15 +848,23 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
 
     // WebRTC connection logic
     const createPeer = useCallback(
-        (targetId: string, stream: MediaStream) => {
+        (targetId: string, stream?: MediaStream) => {
             removePeer(peersRef.current, iceQueuesRef.current, targetId);
             const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
             const activeStream = myStreamRef.current || stream;
 
-            const audioTracks = activeStream?.getAudioTracks() || [];
-            if (audioTracks.length > 0) {
-                audioTracks.forEach((track) => pc.addTrack(track, activeStream));
-            } else {
+            // Audio: add live track if available, otherwise add transceiver
+            let audioAdded = false;
+            const liveAudioTrack = activeStream?.getAudioTracks().find((t) => t.readyState === "live");
+            if (liveAudioTrack) {
+                try {
+                    pc.addTrack(liveAudioTrack, activeStream!);
+                    audioAdded = true;
+                } catch (e) {
+                    console.warn("Could not add audio track, falling back to transceiver:", e);
+                }
+            }
+            if (!audioAdded) {
                 try {
                     pc.addTransceiver("audio", { direction: "sendrecv" });
                 } catch (e) {
@@ -849,10 +872,18 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                 }
             }
 
-            const videoTrack = screenTrackRef.current || activeStream?.getVideoTracks()[0];
-            if (videoTrack) {
-                pc.addTrack(videoTrack, activeStream);
-            } else {
+            // Video: add live track if available, otherwise add transceiver
+            let videoAdded = false;
+            const liveVideoTrack = screenTrackRef.current || activeStream?.getVideoTracks().find((t) => t.readyState === "live");
+            if (liveVideoTrack) {
+                try {
+                    pc.addTrack(liveVideoTrack, activeStream!);
+                    videoAdded = true;
+                } catch (e) {
+                    console.warn("Could not add video track, falling back to transceiver:", e);
+                }
+            }
+            if (!videoAdded) {
                 try {
                     pc.addTransceiver("video", { direction: "sendrecv" });
                 } catch (e) {
@@ -880,16 +911,16 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
         [socket]
     );
 
-    // Join room when approved and stream is ready (only emit once per session)
+    // Join room when approved (only emit once per session)
     useEffect(() => {
-        if (!socket || !myStream || joinStatus !== "approved" || hasJoinedRef.current) return;
+        if (!socket || joinStatus !== "approved" || hasJoinedRef.current) return;
         hasJoinedRef.current = true;
 
         const isVideoActuallyOff =
             isVideoOff ||
             permissionBlocked ||
             !myStream?.getVideoTracks().length ||
-            !myStream.getVideoTracks().some((t) => t.enabled && !(t as any).__isFallback);
+            !myStream?.getVideoTracks().some((t) => t.enabled && !(t as any).__isFallback);
 
         socket.emit("joined-room", {
             roomId,
@@ -902,7 +933,7 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
         if (isVideoActuallyOff) {
             socket.emit("toggle-video-state", { isVideoOff: true, roomId });
         }
-    }, [socket, myStream, joinStatus, isAdmin, user, roomId, isVideoOff, permissionBlocked]);
+    }, [socket, joinStatus, isAdmin, user, roomId, isVideoOff, permissionBlocked, myStream]);
 
     // WebRTC Socket Listeners with ICE Queue
     useEffect(() => {
@@ -911,8 +942,7 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
         const onAllUsers = async (users: string[]) => {
             for (const userId of users) {
                 try {
-                    const activeStream = myStreamRef.current;
-                    if (!activeStream) continue;
+                    const activeStream = myStreamRef.current || new MediaStream();
                     const pc = createPeer(userId, activeStream);
                     const offer = await pc.createOffer();
                     await pc.setLocalDescription(offer);
@@ -924,34 +954,41 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
         };
 
         const onReceiveOffer = async ({ from, offer }: any) => {
-            const activeStream = myStreamRef.current;
-            if (!activeStream) return;
-            const pc = peersRef.current[from] || createPeer(from, activeStream);
-            await pc.setRemoteDescription(new RTCSessionDescription(offer));
+            try {
+                const activeStream = myStreamRef.current || new MediaStream();
+                const pc = peersRef.current[from] || createPeer(from, activeStream);
+                await pc.setRemoteDescription(new RTCSessionDescription(offer));
 
-            // Flush any queued ICE candidates that arrived before the offer
-            const queue = iceQueuesRef.current[from] || [];
-            for (const cand of queue) {
-                await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => { });
-            }
-            iceQueuesRef.current[from] = [];
-
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
-            socket.emit("send-answer", { to: from, answer });
-        };
-
-        const onReceiveAnswer = async ({ from, answer }: any) => {
-            const pc = peersRef.current[from];
-            if (pc) {
-                await pc.setRemoteDescription(new RTCSessionDescription(answer));
-
-                // Flush any queued ICE candidates that arrived before the answer
+                // Flush any queued ICE candidates that arrived before the offer
                 const queue = iceQueuesRef.current[from] || [];
                 for (const cand of queue) {
                     await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => { });
                 }
                 iceQueuesRef.current[from] = [];
+
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                socket.emit("send-answer", { to: from, answer });
+            } catch (err) {
+                console.error("Error handling offer", err);
+            }
+        };
+
+        const onReceiveAnswer = async ({ from, answer }: any) => {
+            try {
+                const pc = peersRef.current[from];
+                if (pc) {
+                    await pc.setRemoteDescription(new RTCSessionDescription(answer));
+
+                    // Flush any queued ICE candidates that arrived before the answer
+                    const queue = iceQueuesRef.current[from] || [];
+                    for (const cand of queue) {
+                        await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => { });
+                    }
+                    iceQueuesRef.current[from] = [];
+                }
+            } catch (err) {
+                console.error("Error handling answer", err);
             }
         };
 
@@ -1083,7 +1120,9 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                 // Update all peers with the active video track if not sharing screen
                 if (!isSharing) {
                     Object.values(peersRef.current).forEach((pc) => {
-                        const sender = pc.getSenders().find((s) => s.track?.kind === "video" || (s as any).kind === "video");
+                        const sender =
+                            pc.getSenders().find((s) => s.track?.kind === "video") ||
+                            pc.getTransceivers().find((t) => t.receiver?.track?.kind === "video")?.sender;
                         if (sender) {
                             sender.replaceTrack(liveTrack!).catch((e) => console.error("replaceTrack error:", e));
                         } else if (activeStream) {
@@ -1135,7 +1174,9 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
             }
 
             Object.values(peersRef.current).forEach((pc) => {
-                const sender = pc.getSenders().find((s) => s.track?.kind === "video" || (s as any).kind === "video");
+                const sender =
+                    pc.getSenders().find((s) => s.track?.kind === "video") ||
+                    pc.getTransceivers().find((t) => t.receiver?.track?.kind === "video")?.sender;
                 sender?.replaceTrack(newTrack).catch((e) => console.error("Flip camera replaceTrack error:", e));
             });
 
@@ -1148,15 +1189,49 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
         }
     };
 
-    const toggleMic = () => {
+    const toggleMic = async () => {
         if (!isAdmin && !canSpeak) {
             handleRequestToSpeak();
             return;
         }
-        const stream = myStreamRef.current || myStream;
-        if (!stream) return;
-        stream.getAudioTracks().forEach((t) => (t.enabled = !t.enabled));
-        setIsMuted((prev) => !prev);
+        let stream = myStreamRef.current || myStream;
+        let audioTrack = stream?.getAudioTracks().find((t) => !(t as any).__isFallback && t.readyState === "live");
+        if (!audioTrack && isMuted) {
+            try {
+                const aStream = await navigator.mediaDevices.getUserMedia({
+                    audio: { echoCancellation: true, noiseSuppression: true },
+                }).catch(() => navigator.mediaDevices.getUserMedia({ audio: true }));
+                const newAudioTrack = aStream.getAudioTracks()[0];
+                if (newAudioTrack) {
+                    if (!stream) {
+                        stream = new MediaStream();
+                        myStreamRef.current = stream;
+                        setMyStream(stream);
+                    }
+                    stream.addTrack(newAudioTrack);
+                    Object.values(peersRef.current).forEach((pc) => {
+                        const sender =
+                            pc.getSenders().find((s) => s.track?.kind === "audio") ||
+                            pc.getTransceivers().find((t) => t.receiver?.track?.kind === "audio")?.sender;
+                        if (sender) {
+                            sender.replaceTrack(newAudioTrack).catch(() => { });
+                        } else {
+                            try {
+                                pc.addTrack(newAudioTrack, stream!);
+                            } catch { }
+                        }
+                    });
+                    setIsMuted(false);
+                    return;
+                }
+            } catch (e) {
+                console.warn("Could not acquire mic on unmute:", e);
+            }
+        }
+        if (stream) {
+            stream.getAudioTracks().forEach((t) => (t.enabled = !t.enabled));
+            setIsMuted((prev) => !prev);
+        }
     };
 
     // Screen sharing
@@ -1164,7 +1239,9 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
         const cameraTrack = myStreamRef.current?.getVideoTracks().find((t) => !(t as any).__isFallback);
         if (screenTrackRef.current) {
             Object.values(peersRef.current).forEach((pc) => {
-                const sender = pc.getSenders().find((s) => s.track?.kind === "video" || (s as any).kind === "video");
+                const sender =
+                    pc.getSenders().find((s) => s.track?.kind === "video") ||
+                    pc.getTransceivers().find((t) => t.receiver?.track?.kind === "video")?.sender;
                 if (sender) {
                     if (cameraTrack && !isVideoOff) {
                         sender.replaceTrack(cameraTrack).catch(() => { });
@@ -1200,7 +1277,9 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
 
             await Promise.all(
                 Object.entries(peersRef.current).map(async ([peerId, pc]) => {
-                    const sender = pc.getSenders().find((s) => s.track?.kind === "video" || (s as any).kind === "video");
+                    const sender =
+                        pc.getSenders().find((s) => s.track?.kind === "video") ||
+                        pc.getTransceivers().find((t) => t.receiver?.track?.kind === "video")?.sender;
                     if (sender) {
                         return sender.replaceTrack(screenTrack);
                     } else {
