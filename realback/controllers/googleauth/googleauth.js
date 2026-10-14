@@ -5,13 +5,17 @@ const jwt = require("jsonwebtoken");
 const User = require("../../model/googleauth/googleauth");
 
 if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
-  passport.use(
-    new GoogleStrategy(
-      {
-        clientID: process.env.GOOGLE_CLIENT_ID,
-        clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-        callbackURL: `${process.env.BACKEND_URL || "http://localhost:8000"}/api/auth/google/callback`,
-      },
+    const rawBackend = process.env.BACKEND_URL || "http://localhost:8000";
+    const cleanBackend = rawBackend.replace(/\/+$/, "");
+
+    passport.use(
+      new GoogleStrategy(
+        {
+          clientID: process.env.GOOGLE_CLIENT_ID,
+          clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+          callbackURL: `${cleanBackend}/api/auth/google/callback`,
+          proxy: true,
+        },
       async (accessToken, refreshToken, profile, done) => {
         try {
           let user = await User.findOne({ googleId: profile.id });
