@@ -262,6 +262,7 @@ function RemoteVideo({
 
     // Track whether stream has a live enabled video track
     const [hasLiveVideoTrack, setHasLiveVideoTrack] = useState(false);
+    const [audioBlocked, setAudioBlocked] = useState(false);
 
     useEffect(() => {
         const checkTracks = () => {
@@ -298,7 +299,7 @@ function RemoteVideo({
     // Presentation stage (isMain) is NEVER considered "video off". Only regular peer camera tiles check profile.isVideoOff.
     const isVideoOff = isMain ? false : (Boolean(profile?.isVideoOff) || !hasLiveVideoTrack);
 
-    // Keep stream attached to video element
+    // Keep stream attached to video element (muted so it never interferes with audio element)
     useEffect(() => {
         const video = videoRef.current;
         if (!video) return;
@@ -308,10 +309,8 @@ function RemoteVideo({
             video.srcObject = nextSrc;
         }
         if (stream) {
-            video.play().catch(() => {
-                video.muted = true;
-                video.play().catch(() => { });
-            });
+            video.muted = true;
+            video.play().catch(() => { });
         }
     }, [stream]);
 
@@ -325,7 +324,23 @@ function RemoteVideo({
             audio.srcObject = nextSrc;
         }
         if (stream) {
-            audio.play().catch(() => { });
+            audio.volume = 1.0;
+            audio.muted = false;
+            const playAudio = () => {
+                audio.play().then(() => {
+                    setAudioBlocked(false);
+                }).catch((err) => {
+                    console.warn("Autoplay audio blocked by browser:", err);
+                    setAudioBlocked(true);
+                });
+            };
+            playAudio();
+            window.addEventListener("click", playAudio, { once: true });
+            window.addEventListener("touchstart", playAudio, { once: true });
+            return () => {
+                window.removeEventListener("click", playAudio);
+                window.removeEventListener("touchstart", playAudio);
+            };
         }
     }, [stream]);
 
@@ -338,7 +353,37 @@ function RemoteVideo({
     return (
         <div style={containerStyle}>
             {/* Audio stream for mic audio even when camera is disabled */}
-            <audio ref={audioRef} autoPlay playsInline />
+            <audio ref={audioRef} autoPlay playsInline controls={false} />
+
+            {/* Tap to Unmute Banner if Browser Blocked Autoplay */}
+            {audioBlocked && (
+                <button
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        if (audioRef.current) {
+                            audioRef.current.play().then(() => setAudioBlocked(false)).catch(() => { });
+                        }
+                    }}
+                    style={{
+                        position: "absolute",
+                        bottom: "8px",
+                        left: "50%",
+                        transform: "translateX(-50%)",
+                        zIndex: 4,
+                        background: "#2563eb",
+                        color: "#fff",
+                        border: "none",
+                        borderRadius: "8px",
+                        padding: "6px 12px",
+                        fontSize: "12px",
+                        fontWeight: 600,
+                        cursor: "pointer",
+                        boxShadow: "0 4px 6px rgba(0,0,0,0.3)",
+                    }}
+                >
+                    🔊 Tap to hear voice
+                </button>
+            )}
 
             {/* Header with peer email & Admin controls */}
             <div
@@ -444,11 +489,15 @@ function RemoteVideo({
                 ref={videoRef}
                 autoPlay
                 playsInline
+                muted
                 style={{
                     width: "100%",
                     height: "100%",
                     objectFit: isMain ? "contain" : "cover",
-                    display: (!isMain && isVideoOff) ? "none" : "block",
+                    position: (!isMain && isVideoOff) ? "absolute" : "relative",
+                    opacity: (!isMain && isVideoOff) ? 0 : 1,
+                    pointerEvents: (!isMain && isVideoOff) ? "none" : "auto",
+                    zIndex: (!isMain && isVideoOff) ? 0 : 1,
                 }}
             />
 
@@ -456,6 +505,8 @@ function RemoteVideo({
             {!isMain && isVideoOff && (
                 <div
                     style={{
+                        position: "relative",
+                        zIndex: 1,
                         width: "100%",
                         height: "100%",
                         display: "flex",
@@ -554,6 +605,21 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                 (typeof window !== "undefined" && window.innerWidth <= 768)
             );
         }
+
+        const resumeMedia = () => {
+            document.querySelectorAll("audio, video").forEach((el) => {
+                const mediaEl = el as HTMLMediaElement;
+                if (mediaEl.paused && mediaEl.srcObject) {
+                    mediaEl.play().catch(() => { });
+                }
+            });
+        };
+        window.addEventListener("click", resumeMedia, { passive: true });
+        window.addEventListener("touchstart", resumeMedia, { passive: true });
+        return () => {
+            window.removeEventListener("click", resumeMedia);
+            window.removeEventListener("touchstart", resumeMedia);
+        };
     }, []);
 
     // Ensure local stream is always attached to localVideoRef
@@ -738,14 +804,58 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
         };
 
         // Participant is granted speaking permission by Admin
-        const onSpeakAllowed = () => {
+        const onSpeakAllowed = async () => {
             setCanSpeak(true);
             setSpeakRequestPending(false);
-            const stream = myStreamRef.current;
-            if (stream) {
-                stream.getAudioTracks().forEach((t) => (t.enabled = true));
-            }
             setIsMuted(false);
+
+            let stream = myStreamRef.current;
+            let liveAudio = stream?.getAudioTracks().find((t) => !(t as any).__isFallback && t.readyState === "live");
+
+            if (!liveAudio) {
+                try {
+                    const audioStream = await navigator.mediaDevices.getUserMedia({
+                        audio: { echoCancellation: true, noiseSuppression: true },
+                    }).catch(() => navigator.mediaDevices.getUserMedia({ audio: true }));
+                    const newAudioTrack = audioStream.getAudioTracks()[0];
+                    if (newAudioTrack) {
+                        if (!stream) {
+                            stream = new MediaStream();
+                            myStreamRef.current = stream;
+                            setMyStream(stream);
+                        }
+                        stream.addTrack(newAudioTrack);
+                        liveAudio = newAudioTrack;
+
+                        Object.entries(peersRef.current).forEach(([peerId, pc]) => {
+                            const transceiver = pc.getTransceivers().find((t) => t.receiver?.track?.kind === "audio");
+                            if (transceiver) {
+                                if (transceiver.direction !== "sendrecv") {
+                                    transceiver.direction = "sendrecv";
+                                }
+                                transceiver.sender.replaceTrack(newAudioTrack).catch(() => {});
+                            } else {
+                                try {
+                                    pc.addTrack(newAudioTrack, stream!);
+                                } catch {}
+                            }
+                            if (pc.signalingState === "stable") {
+                                pc.createOffer().then((offer) => {
+                                    pc.setLocalDescription(offer);
+                                    socket?.emit("send-offer", { to: peerId, offer });
+                                }).catch(() => {});
+                            }
+                        });
+                    }
+                } catch (err) {
+                    console.warn("Could not acquire audio track after host approved speaking:", err);
+                }
+            }
+
+            if (liveAudio) {
+                liveAudio.enabled = true;
+            }
+
             setSpeakNotice("Host allowed you to speak. Your mic is now active.");
             setTimeout(() => setSpeakNotice(null), 5000);
         };
@@ -772,10 +882,17 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
 
         // Broadcast of any peer's speaking permission state
         const onUserSpeakState = ({ socketId, canSpeak: peerCanSpeak }: { socketId: string; canSpeak: boolean }) => {
-            setRemoteProfiles((prev) => ({
-                ...prev,
-                [socketId]: { ...prev[socketId], canSpeak: peerCanSpeak },
-            }));
+            if (socket && socketId === socket.id) {
+                setCanSpeak(peerCanSpeak);
+                return;
+            }
+            setRemoteProfiles((prev) => {
+                if (!prev[socketId]) return prev;
+                return {
+                    ...prev,
+                    [socketId]: { ...prev[socketId], canSpeak: peerCanSpeak },
+                };
+            });
         };
 
         // Chat messages (Volatile UDP-like, not stored in DB)
@@ -788,17 +905,28 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
 
         // Peer video state changes
         const onUserVideoState = ({ socketId, isVideoOff }: { socketId: string; isVideoOff: boolean }) => {
-            setRemoteProfiles((prev) => ({
-                ...prev,
-                [socketId]: { ...prev[socketId], isVideoOff },
-            }));
+            if (socket && socketId === socket.id) return;
+            setRemoteProfiles((prev) => {
+                if (!prev[socketId]) return prev;
+                return {
+                    ...prev,
+                    [socketId]: { ...prev[socketId], isVideoOff },
+                };
+            });
         };
 
         const onAllProfiles = (profiles: Record<string, PeerProfile>) => {
-            setRemoteProfiles(profiles);
+            const filtered: Record<string, PeerProfile> = {};
+            for (const [id, prof] of Object.entries(profiles)) {
+                if (!socket || id !== socket.id) {
+                    filtered[id] = prof;
+                }
+            }
+            setRemoteProfiles(filtered);
         };
 
         const onPeerJoinedProfile = ({ socketId, profile }: { socketId: string; profile: PeerProfile }) => {
+            if (socket && socketId === socket.id) return;
             setRemoteProfiles((prev) => ({ ...prev, [socketId]: profile }));
         };
 
@@ -855,7 +983,7 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
 
             // Audio: add live track if available, otherwise add transceiver
             let audioAdded = false;
-            const liveAudioTrack = activeStream?.getAudioTracks().find((t) => t.readyState === "live");
+            const liveAudioTrack = activeStream?.getAudioTracks().find((t) => !(t as any).__isFallback && t.readyState === "live");
             if (liveAudioTrack) {
                 try {
                     pc.addTrack(liveAudioTrack, activeStream!);
@@ -874,7 +1002,7 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
 
             // Video: add live track if available, otherwise add transceiver
             let videoAdded = false;
-            const liveVideoTrack = screenTrackRef.current || activeStream?.getVideoTracks().find((t) => t.readyState === "live");
+            const liveVideoTrack = screenTrackRef.current || activeStream?.getVideoTracks().find((t) => !(t as any).__isFallback && t.readyState === "live");
             if (liveVideoTrack) {
                 try {
                     pc.addTrack(liveVideoTrack, activeStream!);
@@ -898,11 +1026,23 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
             };
 
             pc.ontrack = (event) => {
-                const incomingStream = event.streams?.[0] || new MediaStream([event.track]);
-                setRemoteStreams((prev) => ({
-                    ...prev,
-                    [targetId]: incomingStream,
-                }));
+                setRemoteStreams((prev) => {
+                    const current = prev[targetId];
+                    if (current) {
+                        if (!current.getTracks().some((t) => t.id === event.track.id)) {
+                            current.addTrack(event.track);
+                        }
+                        return {
+                            ...prev,
+                            [targetId]: new MediaStream(current.getTracks()),
+                        };
+                    }
+                    const newStream = event.streams?.[0] || new MediaStream([event.track]);
+                    return {
+                        ...prev,
+                        [targetId]: newStream,
+                    };
+                });
             };
 
             peersRef.current[targetId] = pc;
@@ -958,6 +1098,25 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                 const activeStream = myStreamRef.current || new MediaStream();
                 const pc = peersRef.current[from] || createPeer(from, activeStream);
                 await pc.setRemoteDescription(new RTCSessionDescription(offer));
+
+                // Bind active live tracks to the negotiated transceivers
+                const liveAudio = activeStream?.getAudioTracks().find((t) => !(t as any).__isFallback && t.readyState === "live");
+                if (liveAudio) {
+                    const audioTransceiver = pc.getTransceivers().find((t) => t.receiver?.track?.kind === "audio");
+                    if (audioTransceiver) {
+                        audioTransceiver.direction = "sendrecv";
+                        await audioTransceiver.sender.replaceTrack(liveAudio).catch(() => {});
+                    }
+                }
+
+                const liveVideo = screenTrackRef.current || activeStream?.getVideoTracks().find((t) => !(t as any).__isFallback && t.readyState === "live");
+                if (liveVideo) {
+                    const videoTransceiver = pc.getTransceivers().find((t) => t.receiver?.track?.kind === "video");
+                    if (videoTransceiver) {
+                        videoTransceiver.direction = "sendrecv";
+                        await videoTransceiver.sender.replaceTrack(liveVideo).catch(() => {});
+                    }
+                }
 
                 // Flush any queued ICE candidates that arrived before the offer
                 const queue = iceQueuesRef.current[from] || [];
@@ -1209,16 +1368,23 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                         setMyStream(stream);
                     }
                     stream.addTrack(newAudioTrack);
-                    Object.values(peersRef.current).forEach((pc) => {
-                        const sender =
-                            pc.getSenders().find((s) => s.track?.kind === "audio") ||
-                            pc.getTransceivers().find((t) => t.receiver?.track?.kind === "audio")?.sender;
-                        if (sender) {
-                            sender.replaceTrack(newAudioTrack).catch(() => { });
+                    Object.entries(peersRef.current).forEach(([peerId, pc]) => {
+                        const transceiver = pc.getTransceivers().find((t) => t.receiver?.track?.kind === "audio");
+                        if (transceiver) {
+                            if (transceiver.direction !== "sendrecv") {
+                                transceiver.direction = "sendrecv";
+                            }
+                            transceiver.sender.replaceTrack(newAudioTrack).catch(() => { });
                         } else {
                             try {
                                 pc.addTrack(newAudioTrack, stream!);
                             } catch { }
+                        }
+                        if (pc.signalingState === "stable") {
+                            pc.createOffer().then((offer) => {
+                                pc.setLocalDescription(offer);
+                                socket?.emit("send-offer", { to: peerId, offer });
+                            }).catch(() => { });
                         }
                     });
                     setIsMuted(false);
@@ -1827,7 +1993,7 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
 
                                 {/* All other remote peers who are not the screen sharer */}
                                 {Object.keys(remoteProfiles)
-                                    .filter((peerId) => peerId !== screenSharerId)
+                                    .filter((peerId) => (!socket || peerId !== socket.id) && peerId !== screenSharerId)
                                     .map((peerId) => (
                                         <RemoteVideo
                                             key={peerId}
@@ -1944,7 +2110,9 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                             </div>
 
                             {/* Remote Peers Video Tiles */}
-                            {Object.keys(remoteProfiles).map((peerId) => (
+                            {Object.keys(remoteProfiles)
+                                .filter((peerId) => !socket || peerId !== socket.id)
+                                .map((peerId) => (
                                 <RemoteVideo
                                     key={peerId}
                                     peerId={peerId}
