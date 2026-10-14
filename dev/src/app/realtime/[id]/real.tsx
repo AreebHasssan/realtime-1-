@@ -126,11 +126,9 @@ async function acquireUserMedia(preferredFacingMode: "user" | "environment" = "u
 
     const mobileVideoConstraints: MediaTrackConstraints = {
         facingMode: { ideal: preferredFacingMode },
-        width: { ideal: 1280, max: 1920 },
-        height: { ideal: 720, max: 1080 },
     };
 
-    // Tier 1: Front camera (facingMode: user) + Audio with noise/echo suppression
+    // Tier 1: Front camera (facingMode) + Audio
     try {
         const stream = await navigator.mediaDevices.getUserMedia({
             video: mobileVideoConstraints,
@@ -998,9 +996,15 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                             setMyStream(newStream);
                         }
                     }
-                } catch (err) {
+                } catch (err: any) {
                     console.error("Camera access failed on toggle:", err);
-                    alert("Could not access camera. Please check your camera permissions in your mobile browser settings.");
+                    if (err?.name === "NotAllowedError" || err?.name === "PermissionDeniedError") {
+                        alert(
+                            "📷 Camera is currently blocked by your phone settings.\n\nTo enable it:\n1. Open your phone's Settings → Apps → Chrome\n2. Tap Permissions → Camera → Allow while using app\n3. Tap the address bar lock icon → Permissions → Enable Camera\n4. Refresh the page."
+                        );
+                    } else {
+                        alert(`Could not start camera: ${err?.message || err?.name || "Access denied"}. Please check phone permissions.`);
+                    }
                     return;
                 }
             }
@@ -1780,6 +1784,23 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                                         <span style={{ fontSize: "12px", color: "#94a3b8", marginTop: "4px" }}>
                                             {permissionBlocked ? "Camera Blocked by Browser" : "Your Camera is Off"}
                                         </span>
+                                        <button
+                                            onClick={toggleVideo}
+                                            style={{
+                                                marginTop: "12px",
+                                                background: "#2563eb",
+                                                color: "#fff",
+                                                border: "none",
+                                                padding: "6px 14px",
+                                                borderRadius: "8px",
+                                                fontSize: "12px",
+                                                fontWeight: 600,
+                                                cursor: "pointer",
+                                                boxShadow: "0 2px 4px rgba(0,0,0,0.2)",
+                                            }}
+                                        >
+                                            📷 Turn On Camera
+                                        </button>
                                     </div>
                                 )}
                             </div>
@@ -2073,8 +2094,18 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
 
                 {/* Share Screen Button (Icon + Label) */}
                 <button
-                    onClick={isSharing ? stopScreenShare : startScreenShare}
-                    disabled={!isSharing && !canShareScreen}
+                    onClick={() => {
+                        if (isSharing) {
+                            stopScreenShare();
+                        } else if (!canShareScreen) {
+                            alert(
+                                "🖥️ Screen Sharing is not supported by mobile browsers on Android & iOS.\n\nTo share your screen, please join this meeting using Chrome, Edge, or Brave on a Laptop or Desktop computer."
+                            );
+                        } else {
+                            startScreenShare();
+                        }
+                    }}
+                    title={!canShareScreen ? "Screen sharing is only supported on Desktop / Laptop computers" : "Share Screen"}
                     style={{
                         display: "flex",
                         alignItems: "center",
@@ -2086,7 +2117,7 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                         fontWeight: 600,
                         fontSize: "13px",
                         color: "#fff",
-                        background: isSharing ? "#f59e0b" : canShareScreen ? "#0d9488" : "#94a3b8",
+                        background: isSharing ? "#f59e0b" : canShareScreen ? "#0d9488" : "#64748b",
                         transition: "all 0.2s",
                     }}
                 >
