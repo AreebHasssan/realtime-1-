@@ -16,7 +16,6 @@ const optionalAuth = (req, res, next) => {
   next();
 };
 
-// Create a meeting
 router.post("/", authMiddleware, async (req, res) => {
   try {
     const { name } = req.body;
@@ -38,7 +37,6 @@ router.post("/", authMiddleware, async (req, res) => {
   }
 });
 
-// Get all meetings created by the logged-in user
 router.get("/", authMiddleware, async (req, res) => {
   try {
     const meetings = await Meeting.find({ creatorEmail: req.user.email }).sort({ createdAt: -1 });
@@ -48,7 +46,6 @@ router.get("/", authMiddleware, async (req, res) => {
   }
 });
 
-// Get meeting info by roomId and check if current user is admin
 router.get("/:roomId", optionalAuth, async (req, res) => {
   try {
     const meeting = await Meeting.findOne({ roomId: req.params.roomId });
@@ -62,7 +59,6 @@ router.get("/:roomId", optionalAuth, async (req, res) => {
   }
 });
 
-// Delete a meeting
 router.delete("/:roomId", authMiddleware, async (req, res) => {
   try {
     await Meeting.findOneAndDelete({

@@ -1,13 +1,12 @@
 function setupSocket(io) {
     const screenSharers = new Map();
-    const roomAdmins = new Map(); // roomId -> { socketId, name, email }
-    const userProfiles = new Map(); // socketId -> { email, name, roomId, isVideoOff, canSpeak }
-    const pendingJoinRequests = new Map(); // roomId -> [{ socketId, email, name }]
+    const roomAdmins = new Map();
+    const userProfiles = new Map();
+    const pendingJoinRequests = new Map();
 
     io.on("connection", (socket) => {
         let currentRoom = null;
 
-        // Peer requests to join room (Admin acceptance flow)
         socket.on("request-join", (data) => {
             const roomId = typeof data === "string" ? data : (data?.roomId || "room");
             const email = data?.email || "Guest";
@@ -20,7 +19,6 @@ function setupSocket(io) {
             } else if (admin) {
                 io.to(admin.socketId).emit("join-request", { socketId: socket.id, email, name });
             } else {
-                // If admin hasn't joined socket yet, queue the knock so admin sees it immediately upon arrival
                 const pending = pendingJoinRequests.get(roomId) || [];
                 if (!pending.some((p) => p.socketId === socket.id)) {
                     pending.push({ socketId: socket.id, email, name });
@@ -29,17 +27,14 @@ function setupSocket(io) {
             }
         });
 
-        // Admin accepts join request
         socket.on("accept-join", ({ targetSocketId, roomId }) => {
             if (roomAdmins.get(roomId)?.socketId === socket.id) {
-                // Remove from pending if present
                 const pending = pendingJoinRequests.get(roomId) || [];
                 pendingJoinRequests.set(roomId, pending.filter((p) => p.socketId !== targetSocketId));
                 io.to(targetSocketId).emit("join-approved");
             }
         });
 
-        // Admin denies join request
         socket.on("deny-join", ({ targetSocketId, roomId }) => {
             if (roomAdmins.get(roomId)?.socketId === socket.id) {
                 const pending = pendingJoinRequests.get(roomId) || [];
@@ -48,14 +43,12 @@ function setupSocket(io) {
             }
         });
 
-        // Admin removes a participant from meeting
         socket.on("remove-participant", ({ targetSocketId, roomId }) => {
             if (roomAdmins.get(roomId)?.socketId === socket.id) {
                 io.to(targetSocketId).emit("removed-by-admin");
             }
         });
 
-        // Participant requests permission to speak
         socket.on("request-to-speak", (data) => {
             const roomId = data?.roomId || currentRoom;
             const email = data?.email || userProfiles.get(socket.id)?.email || "Guest";
@@ -71,7 +64,6 @@ function setupSocket(io) {
             }
         });
 
-        // Participant cancels speak request
         socket.on("cancel-speak-request", (data) => {
             const roomId = data?.roomId || currentRoom;
             const admin = roomAdmins.get(roomId);
@@ -82,10 +74,16 @@ function setupSocket(io) {
             }
         });
 
-        // Admin allows participant to speak
         socket.on("allow-speak", ({ targetSocketId, roomId }) => {
             const rId = roomId || currentRoom;
-            if (roomAdmins.get(rId)?.socketId === socket.id) {
+            const admin = roomAdmins.get(rId);
+            const isAdminSocket = admin?.socketId === socket.id;
+            const isUserAdminProfile = userProfiles.get(socket.id)?.email && userProfiles.get(socket.id)?.email === admin?.email;
+
+            if (isAdminSocket || isUserAdminProfile) {
+                if (admin && admin.socketId !== socket.id) {
+                    admin.socketId = socket.id;
+                }
                 const profile = userProfiles.get(targetSocketId);
                 if (profile) profile.canSpeak = true;
 
@@ -94,18 +92,24 @@ function setupSocket(io) {
             }
         });
 
-        // Admin denies participant's request to speak
         socket.on("deny-speak", ({ targetSocketId, roomId }) => {
             const rId = roomId || currentRoom;
-            if (roomAdmins.get(rId)?.socketId === socket.id) {
+            const admin = roomAdmins.get(rId);
+            const isAdminSocket = admin?.socketId === socket.id;
+            const isUserAdminProfile = userProfiles.get(socket.id)?.email && userProfiles.get(socket.id)?.email === admin?.email;
+
+            if (isAdminSocket || isUserAdminProfile) {
                 io.to(targetSocketId).emit("speak-denied");
             }
         });
 
-        // Admin mutes / closes a participant's mic
         socket.on("revoke-speak", ({ targetSocketId, roomId }) => {
             const rId = roomId || currentRoom;
-            if (roomAdmins.get(rId)?.socketId === socket.id) {
+            const admin = roomAdmins.get(rId);
+            const isAdminSocket = admin?.socketId === socket.id;
+            const isUserAdminProfile = userProfiles.get(socket.id)?.email && userProfiles.get(socket.id)?.email === admin?.email;
+
+            if (isAdminSocket || isUserAdminProfile) {
                 const profile = userProfiles.get(targetSocketId);
                 if (profile) profile.canSpeak = false;
 
@@ -114,7 +118,6 @@ function setupSocket(io) {
             }
         });
 
-        // Volatile UDP-like in-meeting chat message (not stored in DB)
         socket.on("send-message", ({ roomId, text, senderEmail, time }) => {
             if (roomId && text) {
                 socket.to(roomId).emit("receive-message", {
@@ -127,7 +130,6 @@ function setupSocket(io) {
             }
         });
 
-        // Video toggle state broadcast
         socket.on("toggle-video-state", ({ isVideoOff, roomId }) => {
             const rId = roomId || currentRoom;
             const profile = userProfiles.get(socket.id);
@@ -137,7 +139,6 @@ function setupSocket(io) {
             }
         });
 
-        // Peer joins the room officially after admission
         socket.on("joined-room", (data) => {
             const roomId = typeof data === "string" ? data : (data?.roomId || "room");
             const isAdmin = Boolean(data?.isAdmin);
@@ -148,7 +149,7 @@ function setupSocket(io) {
             socket.join(roomId);
 
             const isVideoOff = Boolean(data?.isVideoOff);
-            const canSpeak = isAdmin; // Only admin can speak by default
+            const canSpeak = isAdmin;
 
             userProfiles.set(socket.id, {
                 email: userEmail,
@@ -157,8 +158,6 @@ function setupSocket(io) {
                 isVideoOff,
                 canSpeak,
             });
-
-            console.log(`Socket ${socket.id} joined room ${roomId} (Admin: ${isAdmin})`);
 
             if (isAdmin) {
                 roomAdmins.set(roomId, { socketId: socket.id, name: userName, email: userEmail });
@@ -170,11 +169,9 @@ function setupSocket(io) {
                 }
             }
 
-            // Get all other active peers in room with their profiles
             const otherUsers = Array.from(io.sockets.adapter.rooms.get(roomId) || [])
                 .filter((id) => id !== socket.id && io.sockets.sockets.has(id));
 
-            // Map user profiles for existing peers
             const peersProfiles = {};
             otherUsers.forEach((id) => {
                 peersProfiles[id] = userProfiles.get(id) || { email: "Participant", name: "Participant", isVideoOff: false, canSpeak: false };
@@ -183,7 +180,6 @@ function setupSocket(io) {
             socket.emit("all-users", otherUsers);
             socket.emit("all-profiles", peersProfiles);
 
-            // Broadcast new user profile to room
             socket.to(roomId).emit("peer-joined-profile", {
                 socketId: socket.id,
                 profile: userProfiles.get(socket.id),
@@ -196,7 +192,6 @@ function setupSocket(io) {
             io.to(roomId).emit("room-admin", roomAdmins.get(roomId) || null);
         });
 
-        // Leave room
         socket.on("leave-room", (data) => {
             const roomId = typeof data === "string" ? data : (data?.roomId || currentRoom);
             if (roomId) {
@@ -209,14 +204,12 @@ function setupSocket(io) {
                     io.to(roomId).emit("room-admin", null);
                 }
                 userProfiles.delete(socket.id);
-                console.log(`Socket ${socket.id} left room ${roomId}`);
                 socket.leave(roomId);
                 io.to(roomId).emit("user-left", socket.id);
                 if (currentRoom === roomId) currentRoom = null;
             }
         });
 
-        // Admin ends meeting
         socket.on("end-meeting", (data) => {
             const roomId = typeof data === "string" ? data : (data?.roomId || currentRoom);
             if (roomId && roomAdmins.get(roomId)?.socketId === socket.id) {

@@ -1,6 +1,6 @@
-import Dashboard from "./Dashboard";
-export default function Dashboardp(){
-    return(
-        <Dashboard />
-    )
+import { redirect } from "next/navigation";
+
+export default function DashboardPage() {
+  redirect("/dashboard/myroom");
 }
+

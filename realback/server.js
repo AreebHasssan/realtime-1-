@@ -23,15 +23,12 @@ app.use(cookieParser());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Connect to MongoDB
 if (process.env.DB_URL) {
   mongoose
     .connect(process.env.DB_URL)
-    .then(() => console.log("MongoDB connected successfully"))
-    .catch((err) => console.error("MongoDB connection error:", err.message));
+    .catch(() => {});
 }
 
-// Routes
 app.get("/", (req, res) => {
   res.status(200).json({ status: "online", message: "RealTime Backend API is running" });
 });
@@ -55,7 +52,6 @@ const allowedOrigins = [
 const io = new Server(server, {
   cors: {
     origin: (origin, callback) => {
-      // Allow any origin in dev or if origin is in allowedOrigins
       if (!origin || allowedOrigins.includes(origin) || process.env.NODE_ENV !== "production") {
         return callback(null, true);
       }
@@ -69,7 +65,4 @@ const io = new Server(server, {
 setupSocket(io);
 
 const PORT = process.env.PORT || 8000;
-server.listen(PORT, () => {
-  console.log(`Server and WebSockets running on ports ${PORT}`);
-});
-
+server.listen(PORT);

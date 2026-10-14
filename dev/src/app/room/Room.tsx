@@ -21,7 +21,7 @@ export default function Room() {
     return (
         <div className="mt-10 flex min-h-screen flex-col items-center justify-center gap-4">
             <input
-                className="w-72 rounded border border-gray-400 p-3"
+                className="w-72 rounded-lg border border-slate-300 bg-white p-3 text-slate-900 placeholder-slate-400 font-medium focus:outline-none focus:ring-2 focus:ring-blue-500"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 type="email"
@@ -29,7 +29,7 @@ export default function Room() {
             />
 
             <input
-                className="w-72 rounded border border-gray-400 p-3"
+                className="w-72 rounded-lg border border-slate-300 bg-white p-3 text-slate-900 placeholder-slate-400 font-medium focus:outline-none focus:ring-2 focus:ring-blue-500"
                 value={roomNumber}
                 onChange={(e) => setRoomNumber(e.target.value)}
                 type="text"

@@ -36,8 +36,6 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
       }
     )
   );
-} else {
-  console.warn("Google OAuth credentials missing in .env");
 }
 
 passport.serializeUser((user, done) => done(null, user));

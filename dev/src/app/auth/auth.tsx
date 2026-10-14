@@ -17,12 +17,11 @@ export default function Auth() {
 
   useEffect(() => {
     setMounted(true);
-    // If already logged in on backend, go to dashboard
     fetch(`${BACKEND_URL}/api/auth/check-auth`, { credentials: "include" })
       .then((res) => {
         if (res.ok) router.push("/dashboard");
       })
-      .catch(() => {});
+      .catch(() => { });
   }, [router]);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -80,7 +79,6 @@ export default function Auth() {
           </div>
         )}
 
-        {/* Google Login Button */}
         <button
           type="button"
           onClick={handleGoogleLogin}
@@ -125,7 +123,7 @@ export default function Auth() {
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="John Doe"
-                className="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 border-gray-300"
+                className="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 border-gray-300 bg-white text-slate-900 placeholder-slate-400 font-medium"
               />
             </div>
           )}
@@ -140,7 +138,7 @@ export default function Auth() {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="you@example.com"
-              className="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 border-gray-300"
+              className="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 border-gray-300 bg-white text-slate-900 placeholder-slate-400 font-medium"
             />
           </div>
 
@@ -154,7 +152,7 @@ export default function Auth() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="••••••••"
-              className="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 border-gray-300"
+              className="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 border-gray-300 bg-white text-slate-900 placeholder-slate-400 font-medium"
             />
           </div>
 
@@ -163,7 +161,7 @@ export default function Auth() {
             disabled={loading}
             className="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg shadow transition disabled:opacity-50"
           >
-            {loading ? "Signing in..." : isLogin ? "Sign In & Open Dashboard" : "Sign Up & Open Dashboard"}
+            {loading ? "Signing in..." : isLogin ? "Sign In " : "Sign Up"}
           </button>
         </form>
 
