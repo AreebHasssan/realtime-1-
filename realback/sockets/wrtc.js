@@ -7,25 +7,9 @@ function setupSocket(io) {
         let currentRoom = null;
 
         // Peer requests to join room (Admin acceptance flow)
-        socket.on("request-join", (data) => {
-            const roomId = typeof data === "string" ? data : (data?.roomId || "room");
-            const email = data?.email || "Guest";
-            const name = data?.name || email;
-            const isAdmin = Boolean(data?.isAdmin);
-
-            const admin = roomAdmins.get(roomId);
-
-            // If user is Admin or no Admin is in the room yet, admit directly
-            if (isAdmin || !admin || admin.socketId === socket.id) {
-                socket.emit("join-approved");
-            } else {
-                // Send knock request to the Admin
-                io.to(admin.socketId).emit("join-request", {
-                    socketId: socket.id,
-                    email,
-                    name,
-                });
-            }
+        // Peer requests to join room (admit directly into the meeting)
+        socket.on("request-join", () => {
+            socket.emit("join-approved");
         });
 
         // Admin accepts join request
@@ -154,7 +138,7 @@ function setupSocket(io) {
 
             console.log(`Socket ${socket.id} joined room ${roomId} (Admin: ${isAdmin})`);
 
-            if (isAdmin && !roomAdmins.has(roomId)) {
+            if (isAdmin) {
                 roomAdmins.set(roomId, { socketId: socket.id, name: userName, email: userEmail });
             }
 

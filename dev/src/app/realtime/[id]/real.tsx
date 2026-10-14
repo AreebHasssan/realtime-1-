@@ -563,22 +563,10 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                     }
                 }
 
-                // Request admission via socket
-                if (socket) {
-                    if (meetingIsAdmin) {
-                        setJoinStatus("approved");
-                    } else {
-                        setJoinStatus("waiting");
-                        socket.emit("request-join", {
-                            roomId,
-                            email: currentUser?.email || "Guest",
-                            name: currentUser?.name || currentUser?.email || "Guest",
-                            isAdmin: meetingIsAdmin,
-                        });
-                    }
-                }
+                // Direct admission into the room: participants enter with mic locked by default
+                setJoinStatus("approved");
             } catch {
-                setJoinStatus("waiting");
+                setJoinStatus("approved");
             }
         };
 
@@ -595,45 +583,56 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
             return myStreamRef.current;
         }
 
-        const { stream, hasVideo, hasAudio } = await acquireUserMedia(targetFacing);
+        try {
+            const { stream, hasVideo, hasAudio } = await acquireUserMedia(targetFacing);
 
-        if (!hasVideo) {
-            // Attach a silent fallback video track so RTCPeerConnection ALWAYS has a video sender ready to be replaced later
-            const fallback = createFallbackStream();
-            const fallbackTrack = fallback?.getVideoTracks()[0];
-            if (fallbackTrack) {
-                fallbackTrack.enabled = false;
-                stream.addTrack(fallbackTrack);
+            if (!hasVideo) {
+                // Attach a silent fallback video track so RTCPeerConnection ALWAYS has a video sender ready to be replaced later
+                const fallback = createFallbackStream();
+                const fallbackTrack = fallback?.getVideoTracks()[0];
+                if (fallbackTrack) {
+                    fallbackTrack.enabled = false;
+                    stream.addTrack(fallbackTrack);
+                }
+                setPermissionBlocked(true);
+                setIsVideoOff(true);
+            } else {
+                setPermissionBlocked(false);
+                setIsVideoOff(false);
             }
+
+            // Host has mic open by default; participants join with mic muted and locked unless granted speaking permission
+            const allowedToSpeak = isAdmin || canSpeak;
+            if (!allowedToSpeak) {
+                stream.getAudioTracks().forEach((t) => {
+                    t.enabled = false;
+                });
+                setIsMuted(true);
+            } else if (!hasAudio) {
+                setIsMuted(true);
+            } else {
+                setIsMuted(false);
+            }
+
+            myStreamRef.current = stream;
+            setMyStream(stream);
+
+            if (localVideoRef.current) {
+                localVideoRef.current.srcObject = stream;
+                localVideoRef.current.play().catch(() => { });
+            }
+
+            return stream;
+        } catch (err) {
+            console.warn("Failed to acquire media on entry:", err);
+            const fallback = createFallbackStream() || new MediaStream();
+            myStreamRef.current = fallback;
+            setMyStream(fallback);
             setPermissionBlocked(true);
             setIsVideoOff(true);
-        } else {
-            setPermissionBlocked(false);
-            setIsVideoOff(false);
-        }
-
-        // Host has mic open by default; participants join with mic muted and locked unless granted speaking permission
-        const allowedToSpeak = isAdmin || canSpeak;
-        if (!allowedToSpeak) {
-            stream.getAudioTracks().forEach((t) => {
-                t.enabled = false;
-            });
             setIsMuted(true);
-        } else if (!hasAudio) {
-            setIsMuted(true);
-        } else {
-            setIsMuted(false);
+            return fallback;
         }
-
-        myStreamRef.current = stream;
-        setMyStream(stream);
-
-        if (localVideoRef.current) {
-            localVideoRef.current.srcObject = stream;
-            localVideoRef.current.play().catch(() => { });
-        }
-
-        return stream;
     }, [facingMode, isAdmin, canSpeak]);
 
     useEffect(() => {
