@@ -712,9 +712,35 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                 }
                 setPermissionBlocked(true);
                 setIsVideoOff(true);
+                socket?.emit("toggle-video-state", { isVideoOff: true, roomId });
             } else {
                 setPermissionBlocked(false);
                 setIsVideoOff(false);
+                socket?.emit("toggle-video-state", { isVideoOff: false, roomId });
+
+                const liveVideo = stream.getVideoTracks().find((t) => !(t as any).__isFallback && t.readyState === "live");
+                if (liveVideo) {
+                    Object.values(peersRef.current).forEach((pc) => {
+                        const videoTransceiver = pc.getTransceivers().find(
+                            (t) => t.receiver?.track?.kind === "video" || t.sender?.track?.kind === "video"
+                        );
+                        if (videoTransceiver) {
+                            if (videoTransceiver.direction !== "sendrecv") {
+                                videoTransceiver.direction = "sendrecv";
+                            }
+                            videoTransceiver.sender.replaceTrack(liveVideo).catch(() => {});
+                        } else {
+                            const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+                            if (sender) {
+                                sender.replaceTrack(liveVideo).catch(() => {});
+                            } else {
+                                try {
+                                    pc.addTrack(liveVideo, stream);
+                                } catch {}
+                            }
+                        }
+                    });
+                }
             }
 
             // Host has mic open by default; participants join with mic muted and locked unless granted speaking permission
@@ -728,6 +754,30 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                 setIsMuted(true);
             } else {
                 setIsMuted(false);
+            }
+
+            const liveAudio = stream.getAudioTracks().find((t) => !(t as any).__isFallback && t.readyState === "live");
+            if (liveAudio && allowedToSpeak) {
+                Object.values(peersRef.current).forEach((pc) => {
+                    const audioTransceiver = pc.getTransceivers().find(
+                        (t) => t.receiver?.track?.kind === "audio" || t.sender?.track?.kind === "audio"
+                    );
+                    if (audioTransceiver) {
+                        if (audioTransceiver.direction !== "sendrecv") {
+                            audioTransceiver.direction = "sendrecv";
+                        }
+                        audioTransceiver.sender.replaceTrack(liveAudio).catch(() => {});
+                    } else {
+                        const sender = pc.getSenders().find((s) => s.track?.kind === "audio");
+                        if (sender) {
+                            sender.replaceTrack(liveAudio).catch(() => {});
+                        } else {
+                            try {
+                                pc.addTrack(liveAudio, stream);
+                            } catch {}
+                        }
+                    }
+                });
             }
 
             myStreamRef.current = stream;
@@ -747,9 +797,10 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
             setPermissionBlocked(true);
             setIsVideoOff(true);
             setIsMuted(true);
+            socket?.emit("toggle-video-state", { isVideoOff: true, roomId });
             return fallback;
         }
-    }, [facingMode, isAdmin, canSpeak]);
+    }, [facingMode, isAdmin, canSpeak, socket, roomId]);
 
     useEffect(() => {
         if (joinStatus === "approved") {
@@ -1056,11 +1107,43 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
             email: user?.email || "Participant",
             isVideoOff: isVideoActuallyOff,
         });
-
-        if (isVideoActuallyOff) {
-            socket.emit("toggle-video-state", { isVideoOff: true, roomId });
-        }
     }, [socket, joinStatus, isAdmin, user, roomId, isVideoOff, permissionBlocked, myStream]);
+
+    // Automatically synchronize video state and stream tracks across peers when stream or video status changes
+    useEffect(() => {
+        if (!socket || !hasJoinedRef.current) return;
+        const hasLiveRealVideo = myStream?.getVideoTracks().some(
+            (t) => t.enabled && t.readyState === "live" && !(t as any).__isFallback
+        );
+        const actualOff = isVideoOff || permissionBlocked || !hasLiveRealVideo;
+        socket.emit("toggle-video-state", { isVideoOff: actualOff, roomId });
+
+        if (hasLiveRealVideo && !actualOff && !isSharing) {
+            const liveVideo = myStream?.getVideoTracks().find((t) => !(t as any).__isFallback && t.readyState === "live");
+            if (liveVideo) {
+                Object.values(peersRef.current).forEach((pc) => {
+                    const videoTransceiver = pc.getTransceivers().find(
+                        (t) => t.receiver?.track?.kind === "video" || t.sender?.track?.kind === "video"
+                    );
+                    if (videoTransceiver) {
+                        if (videoTransceiver.direction !== "sendrecv") {
+                            videoTransceiver.direction = "sendrecv";
+                        }
+                        videoTransceiver.sender.replaceTrack(liveVideo).catch(() => {});
+                    } else {
+                        const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+                        if (sender) {
+                            sender.replaceTrack(liveVideo).catch(() => {});
+                        } else if (myStream) {
+                            try {
+                                pc.addTrack(liveVideo, myStream);
+                            } catch {}
+                        }
+                    }
+                });
+            }
+        }
+    }, [socket, roomId, myStream, isVideoOff, permissionBlocked, isSharing]);
 
     // WebRTC Socket Listeners with ICE Queue
     useEffect(() => {
@@ -1094,22 +1177,18 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                 const liveAudio = activeStream?.getAudioTracks().find((t) => !(t as any).__isFallback && t.readyState === "live");
                 const audioTransceiver = pc.getTransceivers().find((t) => t.receiver?.track?.kind === "audio");
                 if (audioTransceiver) {
+                    audioTransceiver.direction = "sendrecv";
                     if (liveAudio) {
-                        audioTransceiver.direction = "sendrecv";
                         await audioTransceiver.sender.replaceTrack(liveAudio).catch(() => {});
-                    } else {
-                        audioTransceiver.direction = "recvonly";
                     }
                 }
 
                 const liveVideo = screenTrackRef.current || activeStream?.getVideoTracks().find((t) => !(t as any).__isFallback && t.readyState === "live");
                 const videoTransceiver = pc.getTransceivers().find((t) => t.receiver?.track?.kind === "video");
                 if (videoTransceiver) {
+                    videoTransceiver.direction = "sendrecv";
                     if (liveVideo) {
-                        videoTransceiver.direction = "sendrecv";
                         await videoTransceiver.sender.replaceTrack(liveVideo).catch(() => {});
-                    } else {
-                        videoTransceiver.direction = "recvonly";
                     }
                 }
 
