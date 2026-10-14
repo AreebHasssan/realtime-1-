@@ -94,6 +94,26 @@ function withoutRemoteStream(streams: RemoteStreams, peerId: string): RemoteStre
     return updated;
 }
 
+function createSilentAudioTrack(): MediaStreamTrack | null {
+    if (typeof window === "undefined") return null;
+    try {
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        if (!AudioCtx) return null;
+        const ctx = new AudioCtx();
+        const oscillator = ctx.createOscillator();
+        const dst = ctx.createMediaStreamDestination();
+        oscillator.connect(dst);
+        oscillator.start();
+        const track = dst.stream.getAudioTracks()[0];
+        if (track) {
+            track.enabled = false;
+            (track as any).__isFallback = true;
+            return track;
+        }
+    } catch { }
+    return null;
+}
+
 function createFallbackStream() {
     if (typeof window === "undefined" || typeof document === "undefined" || typeof MediaStream === "undefined") {
         return null as any;
@@ -109,7 +129,14 @@ function createFallbackStream() {
     const stream = (canvas as any).captureStream ? (canvas as any).captureStream(1) : new MediaStream();
     stream.getVideoTracks().forEach((track: any) => {
         track.__isFallback = true;
+        track.enabled = false;
     });
+
+    const silentAudio = createSilentAudioTrack();
+    if (silentAudio) {
+        stream.addTrack(silentAudio);
+    }
+
     return stream;
 }
 
@@ -218,7 +245,7 @@ function RemoteVideo({
     onAllowSpeak,
     isSpeakRequested,
 }: {
-    stream: MediaStream;
+    stream?: MediaStream;
     peerId: string;
     isMain?: boolean;
     isThumbnail?: boolean;
@@ -275,23 +302,31 @@ function RemoteVideo({
     useEffect(() => {
         const video = videoRef.current;
         if (!video) return;
-        if (video.srcObject !== stream) {
-            video.srcObject = stream;
+        const currentSrc = video.srcObject;
+        const nextSrc = stream || null;
+        if (currentSrc !== nextSrc) {
+            video.srcObject = nextSrc;
         }
-        video.play().catch(() => {
-            video.muted = true;
-            video.play().catch(() => { });
-        });
+        if (stream) {
+            video.play().catch(() => {
+                video.muted = true;
+                video.play().catch(() => { });
+            });
+        }
     }, [stream]);
 
     // Keep audio element active so mic audio plays even when video is off
     useEffect(() => {
         const audio = audioRef.current;
         if (!audio) return;
-        if (audio.srcObject !== stream) {
-            audio.srcObject = stream;
+        const currentSrc = audio.srcObject;
+        const nextSrc = stream || null;
+        if (currentSrc !== nextSrc) {
+            audio.srcObject = nextSrc;
         }
-        audio.play().catch(() => { });
+        if (stream) {
+            audio.play().catch(() => { });
+        }
     }, [stream]);
 
     const containerStyle = isMain
@@ -803,8 +838,18 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
             const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
             const activeStream = myStreamRef.current || stream;
 
-            activeStream.getAudioTracks().forEach((track) => pc.addTrack(track, activeStream));
-            const videoTrack = screenTrackRef.current || activeStream.getVideoTracks()[0];
+            const audioTracks = activeStream?.getAudioTracks() || [];
+            if (audioTracks.length > 0) {
+                audioTracks.forEach((track) => pc.addTrack(track, activeStream));
+            } else {
+                try {
+                    pc.addTransceiver("audio", { direction: "sendrecv" });
+                } catch (e) {
+                    console.warn("Could not add audio transceiver:", e);
+                }
+            }
+
+            const videoTrack = screenTrackRef.current || activeStream?.getVideoTracks()[0];
             if (videoTrack) {
                 pc.addTrack(videoTrack, activeStream);
             } else {
@@ -1702,13 +1747,13 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                                 )}
 
                                 {/* All other remote peers who are not the screen sharer */}
-                                {Object.entries(remoteStreams)
-                                    .filter(([peerId]) => peerId !== screenSharerId)
-                                    .map(([peerId, stream]) => (
+                                {Object.keys(remoteProfiles)
+                                    .filter((peerId) => peerId !== screenSharerId)
+                                    .map((peerId) => (
                                         <RemoteVideo
                                             key={peerId}
                                             peerId={peerId}
-                                            stream={stream}
+                                            stream={remoteStreams[peerId]}
                                             isThumbnail={true}
                                             profile={remoteProfiles[peerId]}
                                             isAdmin={isAdmin}
@@ -1820,11 +1865,11 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                             </div>
 
                             {/* Remote Peers Video Tiles */}
-                            {Object.entries(remoteStreams).map(([peerId, stream]) => (
+                            {Object.keys(remoteProfiles).map((peerId) => (
                                 <RemoteVideo
                                     key={peerId}
                                     peerId={peerId}
-                                    stream={stream}
+                                    stream={remoteStreams[peerId]}
                                     profile={remoteProfiles[peerId]}
                                     isAdmin={isAdmin}
                                     onRemove={handleRemoveParticipant}
