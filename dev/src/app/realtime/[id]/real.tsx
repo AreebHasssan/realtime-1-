@@ -976,48 +976,9 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
 
     // WebRTC connection logic
     const createPeer = useCallback(
-        (targetId: string, stream?: MediaStream) => {
+        (targetId: string, isInitiator: boolean = false) => {
             removePeer(peersRef.current, iceQueuesRef.current, targetId);
             const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-            const activeStream = myStreamRef.current || stream;
-
-            // Audio: add live track if available, otherwise add transceiver
-            let audioAdded = false;
-            const liveAudioTrack = activeStream?.getAudioTracks().find((t) => !(t as any).__isFallback && t.readyState === "live");
-            if (liveAudioTrack) {
-                try {
-                    pc.addTrack(liveAudioTrack, activeStream!);
-                    audioAdded = true;
-                } catch (e) {
-                    console.warn("Could not add audio track, falling back to transceiver:", e);
-                }
-            }
-            if (!audioAdded) {
-                try {
-                    pc.addTransceiver("audio", { direction: "sendrecv" });
-                } catch (e) {
-                    console.warn("Could not add audio transceiver:", e);
-                }
-            }
-
-            // Video: add live track if available, otherwise add transceiver
-            let videoAdded = false;
-            const liveVideoTrack = screenTrackRef.current || activeStream?.getVideoTracks().find((t) => !(t as any).__isFallback && t.readyState === "live");
-            if (liveVideoTrack) {
-                try {
-                    pc.addTrack(liveVideoTrack, activeStream!);
-                    videoAdded = true;
-                } catch (e) {
-                    console.warn("Could not add video track, falling back to transceiver:", e);
-                }
-            }
-            if (!videoAdded) {
-                try {
-                    pc.addTransceiver("video", { direction: "sendrecv" });
-                } catch (e) {
-                    console.warn("Could not add video transceiver:", e);
-                }
-            }
 
             pc.onicecandidate = (event) => {
                 if (event.candidate && socket) {
@@ -1044,6 +1005,32 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
                     };
                 });
             };
+
+            // Only add tracks or transceivers if this peer is the INITIATOR creating the Offer
+            if (isInitiator) {
+                const activeStream = myStreamRef.current;
+                const liveAudioTrack = activeStream?.getAudioTracks().find((t) => !(t as any).__isFallback && t.readyState === "live");
+                if (liveAudioTrack) {
+                    try {
+                        pc.addTrack(liveAudioTrack, activeStream!);
+                    } catch {
+                        pc.addTransceiver("audio", { direction: "sendrecv" });
+                    }
+                } else {
+                    pc.addTransceiver("audio", { direction: "sendrecv" });
+                }
+
+                const liveVideoTrack = screenTrackRef.current || activeStream?.getVideoTracks().find((t) => !(t as any).__isFallback && t.readyState === "live");
+                if (liveVideoTrack) {
+                    try {
+                        pc.addTrack(liveVideoTrack, activeStream!);
+                    } catch {
+                        pc.addTransceiver("video", { direction: "sendrecv" });
+                    }
+                } else {
+                    pc.addTransceiver("video", { direction: "sendrecv" });
+                }
+            }
 
             peersRef.current[targetId] = pc;
             return pc;
@@ -1082,8 +1069,7 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
         const onAllUsers = async (users: string[]) => {
             for (const userId of users) {
                 try {
-                    const activeStream = myStreamRef.current || new MediaStream();
-                    const pc = createPeer(userId, activeStream);
+                    const pc = createPeer(userId, true);
                     const offer = await pc.createOffer();
                     await pc.setLocalDescription(offer);
                     socket.emit("send-offer", { to: userId, offer });
@@ -1095,36 +1081,46 @@ export default function Real({ roomId: propRoomId }: { roomId?: string }) {
 
         const onReceiveOffer = async ({ from, offer }: any) => {
             try {
-                const activeStream = myStreamRef.current || new MediaStream();
-                const pc = peersRef.current[from] || createPeer(from, activeStream);
+                let pc = peersRef.current[from];
+                if (!pc) {
+                    pc = createPeer(from, false);
+                }
+
+                // 1. Set Remote Description FIRST so transceivers are matched to the offer
                 await pc.setRemoteDescription(new RTCSessionDescription(offer));
 
-                // Bind active live tracks to the negotiated transceivers
+                // 2. Bind active live tracks to the negotiated transceivers
+                const activeStream = myStreamRef.current;
                 const liveAudio = activeStream?.getAudioTracks().find((t) => !(t as any).__isFallback && t.readyState === "live");
-                if (liveAudio) {
-                    const audioTransceiver = pc.getTransceivers().find((t) => t.receiver?.track?.kind === "audio");
-                    if (audioTransceiver) {
+                const audioTransceiver = pc.getTransceivers().find((t) => t.receiver?.track?.kind === "audio");
+                if (audioTransceiver) {
+                    if (liveAudio) {
                         audioTransceiver.direction = "sendrecv";
                         await audioTransceiver.sender.replaceTrack(liveAudio).catch(() => {});
+                    } else {
+                        audioTransceiver.direction = "recvonly";
                     }
                 }
 
                 const liveVideo = screenTrackRef.current || activeStream?.getVideoTracks().find((t) => !(t as any).__isFallback && t.readyState === "live");
-                if (liveVideo) {
-                    const videoTransceiver = pc.getTransceivers().find((t) => t.receiver?.track?.kind === "video");
-                    if (videoTransceiver) {
+                const videoTransceiver = pc.getTransceivers().find((t) => t.receiver?.track?.kind === "video");
+                if (videoTransceiver) {
+                    if (liveVideo) {
                         videoTransceiver.direction = "sendrecv";
                         await videoTransceiver.sender.replaceTrack(liveVideo).catch(() => {});
+                    } else {
+                        videoTransceiver.direction = "recvonly";
                     }
                 }
 
-                // Flush any queued ICE candidates that arrived before the offer
+                // 3. Flush any queued ICE candidates that arrived before the offer
                 const queue = iceQueuesRef.current[from] || [];
                 for (const cand of queue) {
                     await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => { });
                 }
                 iceQueuesRef.current[from] = [];
 
+                // 4. Create and send answer
                 const answer = await pc.createAnswer();
                 await pc.setLocalDescription(answer);
                 socket.emit("send-answer", { to: from, answer });
