@@ -14,9 +14,10 @@ const SocketProvider = ({ children }: { children: React.ReactNode }) => {
     const [socket, setSocket] = useState<Socket | null>(null);
 
     useEffect(() => {
-        const backendUrl =
+        const backendUrl = (
             process.env.NEXT_PUBLIC_BACKEND_URL ||
-            "http://localhost:8000";
+            "http://localhost:8000"
+        ).replace(/\/+$/, "");
 
         const newSocket = io(backendUrl, {
             withCredentials: true,

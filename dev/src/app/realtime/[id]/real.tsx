@@ -4,8 +4,8 @@ import { useSocket } from "../../../providers/Sockets";
 import { useEffect, useCallback, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
-const FRONTEND_URL = process.env.NEXT_PUBLIC_FRONTEND_URL || "http://localhost:3000";
+const BACKEND_URL = (process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000").replace(/\/+$/, "");
+const FRONTEND_URL = (process.env.NEXT_PUBLIC_FRONTEND_URL || "http://localhost:3000").replace(/\/+$/, "");
 
 const ICE_SERVERS = [
     { urls: ["stun:stun.l.google.com:19302", "stun:global.stun.twilio.com:3478"] },
