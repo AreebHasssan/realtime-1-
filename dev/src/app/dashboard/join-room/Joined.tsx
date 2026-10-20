@@ -57,7 +57,7 @@ export default function JoinRoomPage() {
                                 setJoinCode(e.target.value);
                                 if (joinError) setJoinError("");
                             }}
-                            placeholder="e.g. abc123 or http://localhost:3000/realtime/abc123"
+                            placeholder="https://realtime/123"
                             className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 transition shadow-inner font-mono font-medium"
                         />
                         {joinError && (
