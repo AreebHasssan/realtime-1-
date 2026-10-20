@@ -49,10 +49,11 @@ const googleCallbackController = (req, res) => {
 
   const payload = {
     id: req.user._id,
+    name: req.user.displayName || req.user.name || "",
     email: req.user.email,
   };
 
-  const token = jwt.sign(payload, process.env.JWT_SECRET || "default_secret", {
+  const token = jwt.sign(payload, process.env.JWT_SECRET || "CLIENT_SECRET_KEY", {
     expiresIn: "7d",
   });
 
@@ -65,7 +66,7 @@ const googleCallbackController = (req, res) => {
     maxAge: 7 * 24 * 60 * 60 * 1000,
   });
 
-  res.redirect(`${frontend}/dashboard`);
+  res.redirect(`${frontend}/dashboard?token=${token}`);
 };
 
 const verifyAuthController = (req, res) => {
