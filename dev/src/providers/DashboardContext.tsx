@@ -93,6 +93,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
   const handleLogout = async () => {
     try {
+      document.cookie = "token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT";
       await fetch(`${BACKEND_URL}/api/auth/logout`, {
         method: "POST",
         credentials: "include",

@@ -46,7 +46,11 @@ export default function Auth() {
         throw new Error(data.message || "Authentication failed");
       }
 
-      router.push("/dashboard");
+      if (data.token) {
+        document.cookie = `token=${data.token}; path=/; max-age=${4 * 60 * 60}; SameSite=Lax`;
+      }
+
+      window.location.href = "/dashboard";
     } catch (err: any) {
       setError(err.message || "Failed to authenticate with backend");
     } finally {
