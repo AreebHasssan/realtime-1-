@@ -26,11 +26,11 @@ app.use(express.urlencoded({ extended: true }));
 if (process.env.DB_URL) {
   mongoose
     .connect(process.env.DB_URL)
-    .catch(() => {});
+    .catch(() => { });
 }
 
 app.get("/", (req, res) => {
-  res.status(200).json({ status: "online", message: "RealTime Backend API is running" });
+  res.status(200).json({ status: "online", message: "RealTime Backend API is running good" });
 });
 app.get("/api/health", (req, res) => {
   res.status(200).json({ status: "healthy" });
